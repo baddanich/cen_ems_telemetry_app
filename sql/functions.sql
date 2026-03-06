@@ -1,0 +1,3 @@
+-- SQLite: recompute_energy_deltas logic (run as parameterized statement)
+-- SQLite does not support stored functions. The logic is executed from Python
+-- via sql/queries/recompute_energy_deltas.sql

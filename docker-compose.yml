@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: cenems_backend
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:///data/cenems.db
+    volumes:
+      - cenems_data:/app/data
+    ports:
+      - "8000:8000"
+
+volumes:
+  cenems_data:
