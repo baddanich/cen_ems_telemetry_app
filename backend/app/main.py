@@ -1,3 +1,8 @@
+"""
+ASGI app entry point. Used by production (uvicorn backend.app.main:app) and by tests
+(import create_app for an ASGI app instance). Kept here so there is a single place
+that wires lifespan, router, and config; tests import create_app from this module.
+"""
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI

@@ -5,6 +5,7 @@ from typing import AsyncIterator
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from backend.app.config import get_settings
 
 # Use shared in-memory SQLite for tests (so app and tests use same DB)
 os.environ.setdefault(
@@ -12,15 +13,6 @@ os.environ.setdefault(
     "sqlite+aiosqlite:///file:testmem?mode=memory&cache=shared",
 )
 
-from backend.app.config import get_settings
-
-
-async def _clean_db(db_session: AsyncSession) -> None:
-    await db_session.execute(text("DELETE FROM measurements"))
-    await db_session.execute(text("DELETE FROM raw_events"))
-    await db_session.execute(text("DELETE FROM devices"))
-    await db_session.execute(text("DELETE FROM buildings"))
-    await db_session.commit()
 
 def _split_sql_statements(sql: str) -> list[str]:
     """Split SQL into individual statements (SQLite executes one at a time)."""
@@ -36,18 +28,16 @@ def _split_sql_statements(sql: str) -> list[str]:
 async def _apply_migrations(session: AsyncSession) -> None:
     root = Path(__file__).resolve().parents[2]
     schema_path = root / "sql" / "schema.sql"
-    functions_path = root / "sql" / "functions.sql"
 
     # Drop tables so CREATE TABLE IF NOT EXISTS uses latest schema
     for table in ("measurements", "raw_events", "devices", "buildings"):
         await session.execute(text(f"DROP TABLE IF EXISTS {table}"))
     await session.commit()
 
-    for path in (schema_path, functions_path):
-        sql = path.read_text(encoding="utf-8")
-        for stmt in _split_sql_statements(sql):
-            if stmt:
-                await session.execute(text(stmt))
+    sql = schema_path.read_text(encoding="utf-8")
+    for stmt in _split_sql_statements(sql):
+        if stmt:
+            await session.execute(text(stmt))
     await session.commit()
 
 

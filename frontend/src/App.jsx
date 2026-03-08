@@ -1,3 +1,7 @@
+/**
+ * CenEMS Telemetry Viewer: filter by Building/Device, view Energy time-series
+ * (with zoom), latest readings, totals; optional bad records overlay.
+ */
 import React, { useEffect, useMemo, useState } from "react";
 import {
   LineChart,
@@ -10,6 +14,7 @@ import {
   Legend
 } from "recharts";
 
+/** API client: all endpoints use GET except ingest (POST). */
 const api = {
   async getBuildings() {
     const res = await fetch("/buildings");
@@ -20,12 +25,6 @@ const api = {
     if (buildingId === "all") return [];
     const res = await fetch(`/buildings/${buildingId}/devices`);
     if (!res.ok) throw new Error("Failed to fetch devices");
-    return res.json();
-  },
-  async getLatest(deviceId) {
-    if (deviceId === "all") return [];
-    const res = await fetch(`/devices/${deviceId}/latest`);
-    if (!res.ok) throw new Error("Failed to fetch latest measurements");
     return res.json();
   },
   async getRecent(deviceId, metric, limit, offset, includeBad = false) {
@@ -90,11 +89,6 @@ function formatQualityFlags(m) {
   return parts.length ? parts.join(", ") : "";
 }
 
-function metricDisplayName(metric, unit) {
-  if (metric === "energy_kwh_total") return "Energy";
-  return `${metric} (${unit})`;
-}
-
 const PREFIXES = [
   { value: 1, label: "kWh" },
   { value: 1e3, label: "MWh" },
@@ -107,16 +101,7 @@ function toDateStr(d) {
   return d.toISOString().slice(0, 10);
 }
 
-function startOfDay(str) {
-  if (!str) return null;
-  return new Date(str + "T00:00:00.000Z");
-}
-
-function endOfDay(str) {
-  if (!str) return null;
-  return new Date(str + "T23:59:59.999Z");
-}
-
+/** Build start of time range in local time (date + time). */
 function toStartDateTime(dateStr, timeStr) {
   if (!dateStr) return null;
   const t = (timeStr || "00:00").trim();
@@ -126,6 +111,7 @@ function toStartDateTime(dateStr, timeStr) {
   return d;
 }
 
+/** Build end of time range in local time (date + time). */
 function toEndDateTime(dateStr, timeStr) {
   if (!dateStr) return null;
   const t = (timeStr || "23:59").trim();
@@ -219,23 +205,6 @@ function App() {
       })
       .catch((e) => setError(e.message));
   }, [selectedBuildingId]);
-
-  useEffect(() => {
-    if (!selectedDeviceId || selectedDeviceId === "all") {
-      setLatest([]);
-      setRecentRecords([]);
-      return;
-    }
-    setLoading(true);
-    api
-      .getLatest(selectedDeviceId)
-      .then((data) => {
-        const list = Array.isArray(data) ? data : [];
-        setLatest(list);
-      })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [selectedDeviceId]);
 
   const apiMetric = selectedMetric || "energy_kwh_total";
 
@@ -458,11 +427,8 @@ function App() {
     >
       <h2 style={{ marginBottom: "0.5rem" }}>CenEMS Telemetry Viewer</h2>
       <p style={{ marginBottom: "1rem", fontSize: "0.9rem", color: "#555", maxWidth: "720px" }}>
-        View energy (kWh) by <strong>Building</strong> and <strong>Device</strong>. Use <strong>Time range</strong> to filter data (or &quot;All time&quot;). 
-        The <strong>Time-series</strong> chart shows values or deltas with <strong>Zoom in/out</strong> and <strong>Reset</strong>. 
-        <strong>Bad records</strong> (e.g. unknown units) can be shown or hidden in the chart and table. 
-        <strong>Latest readings</strong> lists recent measurements with quality flags; <strong>Total</strong> is the sum of deltas in the selected range. 
-        <strong>Scale</strong> (kWh / MWh / GWh) and <strong>Mode</strong> (raw value vs delta) apply to the chart and totals.
+        Select <strong>Building</strong> {'->'} <strong>All</strong> to show total energy distribution across all buildings. 
+        <br />Select <strong>Device</strong> {'->'} <strong>All</strong> to show total energy consumption from all sensors. 
       </p>
 
       {error && (
@@ -549,10 +515,9 @@ function App() {
         <div>
           <label>
             <strong>Time range</strong>
-            <br />
             <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
               {allTime ? (
-                <span style={{ padding: "4px 8px", color: "#666" }}>All time</span>
+                <span style={{ padding: "4px 8px", color: "#666" }}>Calendar</span>
               ) : (
                 <>
                   <input
@@ -632,7 +597,9 @@ function App() {
         <div>
           <label>
             <strong>Bad records</strong>
-            <br />
+            <p style={{ marginBottom: "1rem", fontSize: "0.9rem", color: "#555", maxWidth: "720px" }}>
+              <strong>Bad records</strong> (e.g. unknown units) can be shown or hidden in the chart and table.
+            </p>
             <select
               value={badRecordsOption}
               onChange={(e) => setBadRecordsOption(e.target.value)}
@@ -744,6 +711,7 @@ function App() {
                         dot={{ r: 4, fill: "#9ca3af" }}
                         connectNulls
                         name={"Bad: " + key.replace("bad_", "")}
+                        legendType="none"
                         isAnimationActive={false}
                       />
                     ))}
@@ -829,7 +797,7 @@ function App() {
                 </thead>
                 <tbody>
                   {paginatedRecent.map((m, i) => (
-                    <tr key={m.id != null ? m.id : `${m.ts}-${m.metric}-${i}`}>
+                    <tr key={m.raw_event_id != null ? m.raw_event_id : (m.id != null ? m.id : `${m.ts}-${m.metric}-${i}`)}>
                       <td>{m.id != null ? m.id : "—"}</td>
                       <td>{new Date(m.ts).toLocaleString()}</td>
                       <td align="right">{m.value.toFixed(3)}</td>

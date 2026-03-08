@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS raw_events (
     value        REAL NOT NULL,
     unit         TEXT NOT NULL,
     raw_payload  TEXT,
-    dedupe_key   TEXT NOT NULL UNIQUE
+    dedupe_key   TEXT NOT NULL,
+    is_duplicate INTEGER NOT NULL DEFAULT 0
 );
 
 -- Normalized measurements in canonical units and timestamps

@@ -51,15 +51,13 @@ def _split_sql_statements(sql: str) -> list[str]:
 async def _run_migrations() -> None:
     root = Path(__file__).resolve().parents[2]
     schema_path = root / "sql" / "schema.sql"
-    functions_path = root / "sql" / "functions.sql"
 
     async with _session_factory() as session:
-        for path in (schema_path, functions_path):
-            sql = path.read_text(encoding="utf-8")
-            for stmt in _split_sql_statements(sql):
-                if stmt:
-                    logger.info("Applying SQL file", extra={"path": str(path)})
-                    await session.execute(text(stmt))
+        sql = schema_path.read_text(encoding="utf-8")
+        for stmt in _split_sql_statements(sql):
+            if stmt:
+                logger.info("Applying SQL file", extra={"path": str(schema_path)})
+                await session.execute(text(stmt))
         await session.commit()
 
 

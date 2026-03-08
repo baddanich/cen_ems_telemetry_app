@@ -1,2 +1,8 @@
-INSERT INTO buildings (id, name)
-VALUES (:id, :name);
+INSERT INTO buildings (
+    id, 
+    name
+)
+VALUES (
+    :id, 
+    :name
+);
