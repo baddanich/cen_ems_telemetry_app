@@ -17,6 +17,7 @@ class Device(BaseModel):
 
 
 class Measurement(BaseModel):
+    id: Optional[int] = None
     ts: datetime
     metric: str
     value: float

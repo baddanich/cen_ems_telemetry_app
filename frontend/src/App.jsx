@@ -28,19 +28,26 @@ const api = {
     if (!res.ok) throw new Error("Failed to fetch latest measurements");
     return res.json();
   },
-  async getRecent(deviceId, metric, limit, offset) {
+  async getRecent(deviceId, metric, limit, offset, includeBad = false) {
     if (deviceId === "all") return [];
-    const params = new URLSearchParams({ metric, limit: String(limit), offset: String(offset) });
+    const params = new URLSearchParams({
+      metric,
+      limit: String(limit),
+      offset: String(offset),
+      exclude_bad: includeBad ? "false" : "true"
+    });
     const res = await fetch(`/devices/${deviceId}/recent?${params.toString()}`);
     if (!res.ok) throw new Error("Failed to fetch recent measurements");
     return res.json();
   },
-  async getTimeseries(deviceId, metric, start, end, buildingId) {
+  async getTimeseries(deviceId, metric, start, end, buildingId, includeBad = false) {
+    const excludeBad = !includeBad;
     if (buildingId === "all" || deviceId === "all") {
       const params = new URLSearchParams({
         building_id: buildingId || "all",
         device_id: deviceId || "all",
-        metric: metric || "energy_kwh_total"
+        metric: metric || "energy_kwh_total",
+        exclude_bad: excludeBad ? "true" : "false"
       });
       if (start) params.append("start", start.toISOString());
       if (end) params.append("end", end.toISOString());
@@ -48,11 +55,27 @@ const api = {
       if (!res.ok) throw new Error("Failed to fetch aggregated timeseries");
       return res.json();
     }
-    const params = new URLSearchParams({ device_id: deviceId, metric });
+    const params = new URLSearchParams({ device_id: deviceId, metric, exclude_bad: excludeBad ? "true" : "false" });
     if (start) params.append("start", start.toISOString());
     if (end) params.append("end", end.toISOString());
     const res = await fetch(`/timeseries?${params.toString()}`);
     if (!res.ok) throw new Error("Failed to fetch timeseries");
+    return res.json();
+  },
+  async getSumDeltas(buildingId, deviceId, metric, start, end) {
+    const params = new URLSearchParams({ building_id: buildingId || "all", device_id: deviceId || "all", metric: metric || "energy_kwh_total" });
+    if (start) params.append("start", start.toISOString());
+    if (end) params.append("end", end.toISOString());
+    const res = await fetch(`/timeseries/sum_deltas?${params.toString()}`);
+    if (!res.ok) throw new Error("Failed to fetch sum deltas");
+    return res.json();
+  },
+  async getAggregatedBadPoints(start, end) {
+    const params = new URLSearchParams({ building_id: "all", metric: "energy_kwh_total" });
+    if (start) params.append("start", start.toISOString());
+    if (end) params.append("end", end.toISOString());
+    const res = await fetch(`/timeseries/aggregated_bad_points?${params.toString()}`);
+    if (!res.ok) throw new Error("Failed to fetch bad points");
     return res.json();
   }
 };
@@ -68,7 +91,7 @@ function formatQualityFlags(m) {
 }
 
 function metricDisplayName(metric, unit) {
-  if (metric === "energy_kwh_total") return `Energy Total (${unit})`;
+  if (metric === "energy_kwh_total") return "Energy";
   return `${metric} (${unit})`;
 }
 
@@ -94,15 +117,33 @@ function endOfDay(str) {
   return new Date(str + "T23:59:59.999Z");
 }
 
+function toStartDateTime(dateStr, timeStr) {
+  if (!dateStr) return null;
+  const t = (timeStr || "00:00").trim();
+  const [hh, mm] = t.split(":").map((s) => parseInt(s, 10) || 0);
+  const d = new Date(dateStr + "T00:00:00");
+  d.setHours(hh, mm, 0, 0);
+  return d;
+}
+
+function toEndDateTime(dateStr, timeStr) {
+  if (!dateStr) return null;
+  const t = (timeStr || "23:59").trim();
+  const [hh, mm] = t.split(":").map((s) => parseInt(s, 10) || 0);
+  const d = new Date(dateStr + "T00:00:00");
+  d.setHours(hh, mm, 59, 999);
+  return d;
+}
+
 function App() {
   const [buildings, setBuildings] = useState([]);
-  const [selectedBuildingId, setSelectedBuildingId] = useState("");
+  const [selectedBuildingId, setSelectedBuildingId] = useState("all");
   const [devices, setDevices] = useState([]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState("");
+  const [selectedDeviceId, setSelectedDeviceId] = useState("all");
   const [latest, setLatest] = useState([]);
   const [recentRecords, setRecentRecords] = useState([]);
   const [recentPage, setRecentPage] = useState(0);
-  const [selectedMetric, setSelectedMetric] = useState("");
+  const [selectedMetric, setSelectedMetric] = useState("energy_kwh_total");
   const [metricMode, setMetricMode] = useState("raw");
   const [dateStart, setDateStart] = useState(() => {
     const d = new Date();
@@ -110,38 +151,30 @@ function App() {
     return toDateStr(d);
   });
   const [dateEnd, setDateEnd] = useState(() => toDateStr(new Date()));
+  const [timeStart, setTimeStart] = useState("00:00");
+  const [timeEnd, setTimeEnd] = useState("23:59");
   const [timeseries, setTimeseries] = useState([]);
   const [aggregatedData, setAggregatedData] = useState([]);
+  const [sumDeltas, setSumDeltas] = useState(null);
   const [valuePrefix, setValuePrefix] = useState(1);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-
-  const [allTime, setAllTime] = useState(false);
-  const [activePreset, setActivePreset] = useState("7d");
+  const [badRecordsOption, setBadRecordsOption] = useState("hide");
+  const showBadRecords = badRecordsOption === "show";
+  const [allTime, setAllTime] = useState(true);
+  const [chartZoomStart, setChartZoomStart] = useState(0);
+  const [chartZoomEnd, setChartZoomEnd] = useState(0);
+  const [aggregatedBadPoints, setAggregatedBadPoints] = useState([]);
 
   const getTimeRangeDates = () => {
     if (allTime || !dateStart || !dateEnd) return { start: null, end: null };
-    return { start: startOfDay(dateStart), end: endOfDay(dateEnd) };
-  };
-
-  const applyPreset = (preset) => {
-    setActivePreset(preset);
-    setAllTime(preset === "all");
-    if (preset === "7d") {
-      const d = new Date();
-      setDateEnd(toDateStr(d));
-      d.setDate(d.getDate() - 7);
-      setDateStart(toDateStr(d));
-    } else if (preset === "30d") {
-      const d = new Date();
-      setDateEnd(toDateStr(d));
-      d.setDate(d.getDate() - 30);
-      setDateStart(toDateStr(d));
-    }
+    return {
+      start: toStartDateTime(dateStart, timeStart),
+      end: toEndDateTime(dateEnd, timeEnd)
+    };
   };
 
   const onDateChange = (which, value) => {
-    setActivePreset(null);
     if (which === "start") setDateStart(value);
     else setDateEnd(value);
   };
@@ -150,28 +183,38 @@ function App() {
     api
       .getBuildings()
       .then((data) => {
-        setBuildings(data);
-        if (data.length > 0) {
-          setSelectedBuildingId(data[0].id);
+        const list = Array.isArray(data) ? data : [];
+        setBuildings(list);
+        if (list.length > 0) {
+          setSelectedBuildingId(list[0].id);
         }
       })
       .catch((e) => setError(e.message));
   }, []);
 
   useEffect(() => {
-    if (!selectedBuildingId) return;
+    if (!selectedBuildingId || selectedBuildingId === "all") {
+      setDevices([]);
+      setSelectedDeviceId("all");
+      setLatest([]);
+      setRecentRecords([]);
+      setTimeseries([]);
+      setSelectedMetric("energy_kwh_total");
+      return;
+    }
     api
       .getDevices(selectedBuildingId)
       .then((data) => {
-        setDevices(data);
-        if (data.length > 0) {
-          setSelectedDeviceId(data[0].id);
+        const list = Array.isArray(data) ? data : [];
+        setDevices(list);
+        if (list.length > 0) {
+          setSelectedDeviceId(list[0].id);
         } else {
-          setSelectedDeviceId(selectedBuildingId === "all" ? "all" : "");
+          setSelectedDeviceId("all");
           setLatest([]);
           setRecentRecords([]);
           setTimeseries([]);
-          if (selectedBuildingId === "all") setSelectedMetric("energy_kwh_total");
+          setSelectedMetric("energy_kwh_total");
         }
       })
       .catch((e) => setError(e.message));
@@ -187,16 +230,27 @@ function App() {
     api
       .getLatest(selectedDeviceId)
       .then((data) => {
-        setLatest(data);
-        if (data.length > 0) {
-          setSelectedMetric(data[0].metric);
-        } else {
-          setSelectedMetric("");
-        }
+        const list = Array.isArray(data) ? data : [];
+        setLatest(list);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, [selectedDeviceId]);
+
+  const apiMetric = selectedMetric || "energy_kwh_total";
+
+  const metricOptions = useMemo(
+    () => [{ value: "energy_kwh_total", label: "Energy" }],
+    []
+  );
+
+  useEffect(() => {
+    const values = metricOptions.map((o) => o.value);
+    if (selectedMetric && metricOptions.length > 0 && !values.includes(selectedMetric)) {
+      const next = metricOptions[0].value;
+      if (next !== selectedMetric) setSelectedMetric(next);
+    }
+  }, [metricOptions, selectedMetric]);
 
   useEffect(() => {
     if (!selectedDeviceId || !selectedMetric) {
@@ -206,18 +260,19 @@ function App() {
     }
     if (selectedDeviceId === "all") return;
     api
-      .getRecent(selectedDeviceId, selectedMetric, 100, 0)
+      .getRecent(selectedDeviceId, apiMetric, 100, 0, showBadRecords)
       .then((data) => {
         setRecentRecords(data);
         setRecentPage(0);
       })
       .catch(() => setRecentRecords([]));
-  }, [selectedDeviceId, selectedMetric]);
+  }, [selectedDeviceId, selectedMetric, showBadRecords]);
 
   useEffect(() => {
     if (!selectedMetric) {
       setTimeseries([]);
       setAggregatedData([]);
+      setSumDeltas(null);
       return;
     }
     const useAggregated = selectedBuildingId === "all" || selectedDeviceId === "all";
@@ -225,7 +280,7 @@ function App() {
     if (!useAggregated && selectedDeviceId) {
       setLoading(true);
       api
-        .getTimeseries(selectedDeviceId, selectedMetric, start, end)
+        .getTimeseries(selectedDeviceId, apiMetric, start, end, null, showBadRecords)
         .then((data) => {
           setTimeseries(data);
           setAggregatedData([]);
@@ -235,29 +290,35 @@ function App() {
     } else if (useAggregated) {
       setLoading(true);
       api
-        .getTimeseries("all", selectedMetric, start, end, selectedBuildingId || "all")
+        .getTimeseries("all", apiMetric, start, end, selectedBuildingId || "all", false)
         .then((data) => {
           setAggregatedData(Array.isArray(data) ? data : []);
           setTimeseries([]);
         })
         .catch((e) => setError(e.message))
         .finally(() => setLoading(false));
+      if (selectedBuildingId === "all" && showBadRecords) {
+        api.getAggregatedBadPoints(start, end).then((data) => setAggregatedBadPoints(Array.isArray(data) ? data : [])).catch(() => setAggregatedBadPoints([]));
+      } else {
+        setAggregatedBadPoints([]);
+      }
     } else {
       setTimeseries([]);
       setAggregatedData([]);
     }
-  }, [selectedDeviceId, selectedMetric, selectedBuildingId, dateStart, dateEnd, allTime]);
+  }, [selectedDeviceId, selectedMetric, selectedBuildingId, dateStart, dateEnd, timeStart, timeEnd, allTime, showBadRecords]);
 
-  const metricOptions = useMemo(() => {
-    const opts = latest.map((m) => ({
-      value: m.metric,
-      label: metricDisplayName(m.metric, m.unit)
-    }));
-    if (opts.length === 0 && (selectedBuildingId === "all" || selectedDeviceId === "all")) {
-      return [{ value: "energy_kwh_total", label: "Energy Total (kWh)" }];
+  useEffect(() => {
+    if (!selectedMetric) {
+      setSumDeltas(null);
+      return;
     }
-    return opts;
-  }, [latest, selectedBuildingId, selectedDeviceId]);
+    const { start, end } = getTimeRangeDates();
+    api
+      .getSumDeltas(selectedBuildingId || "all", selectedDeviceId || "all", apiMetric, start, end)
+      .then((data) => setSumDeltas(data.sum_delta))
+      .catch(() => setSumDeltas(null));
+  }, [selectedBuildingId, selectedDeviceId, selectedMetric, dateStart, dateEnd, timeStart, timeEnd, allTime, showBadRecords]);
 
   const paginatedRecent = useMemo(() => {
     const start = recentPage * RECORDS_PER_PAGE;
@@ -270,27 +331,65 @@ function App() {
 
   const chartData = useMemo(() => {
     if (aggregatedData.length > 0) {
+      const key = metricMode === "delta" ? "delta" : "value";
       const byTs = {};
+      const allLabels = new Set();
       aggregatedData.forEach((r) => {
         const ts = r.ts;
         const label = r.label || "Total";
+        allLabels.add(label);
         if (!byTs[ts]) byTs[ts] = { tsLabel: new Date(ts).toLocaleTimeString(), ts };
-        const key = metricMode === "delta" ? "delta" : "value";
-        byTs[ts][label] = ((r[key] ?? 0) / valuePrefix);
+        byTs[ts][label] = (r[key] ?? 0) / valuePrefix;
       });
-      return Object.values(byTs).sort((a, b) => new Date(a.ts) - new Date(b.ts));
+      const sortedLabels = [...allLabels].sort();
+      const sortedTs = Object.keys(byTs).sort((a, b) => new Date(a) - new Date(b));
+      const badByTs = {};
+      aggregatedBadPoints.forEach((p) => {
+        const ts = p.ts;
+        const label = p.label || "Total";
+        if (!badByTs[ts]) badByTs[ts] = {};
+        badByTs[ts][label] = (p[key] ?? 0) / valuePrefix;
+      });
+      return sortedTs.map((ts) => {
+        const row = { tsLabel: byTs[ts].tsLabel, ts: byTs[ts].ts };
+        sortedLabels.forEach((label) => {
+          row[label] = byTs[ts][label] ?? null;
+        });
+        sortedLabels.forEach((label) => {
+          row["bad_" + label] = badByTs[ts]?.[label] ?? null;
+        });
+        return row;
+      });
     }
+    const key = metricMode === "delta" ? "delta" : "value";
     return timeseries
-      .filter((p) => !p.is_bad)
-      .map((p) => ({
-        ...p,
-        tsLabel: new Date(p.ts).toLocaleTimeString(),
-        value: (p.value || 0) / valuePrefix,
-        delta: (p.delta ?? 0) / valuePrefix
-      }));
-  }, [timeseries, aggregatedData, valuePrefix, metricMode]);
+      .filter((p) => showBadRecords || !p.is_bad)
+      .map((p) => {
+        const val = (metricMode === "delta" ? (p.delta ?? 0) : (p.value || 0)) / valuePrefix;
+        return {
+          ...p,
+          tsLabel: new Date(p.ts).toLocaleTimeString(),
+          value: (p.value || 0) / valuePrefix,
+          delta: (p.delta ?? 0) / valuePrefix,
+          mainValue: p.is_bad ? null : val,
+          badValue: p.is_bad ? val : null,
+          lateValue: p.is_late ? val : null,
+          is_late: p.is_late,
+          is_bad: p.is_bad
+        };
+      });
+  }, [timeseries, aggregatedData, aggregatedBadPoints, valuePrefix, metricMode, showBadRecords]);
 
   const CHART_COLORS = ["#2563eb", "#16a34a", "#dc2626", "#9333ea", "#ea580c", "#0891b2", "#4f46e5", "#059669"];
+  const AGGREGATED_SERIES_KEYS = ["ts", "tsLabel", "mainValue", "badValue", "lateValue", "is_late", "is_bad"];
+  const aggregatedChartKeys =
+    aggregatedData.length > 0 && chartData.length > 0
+      ? Object.keys(chartData[0]).filter((k) => !AGGREGATED_SERIES_KEYS.includes(k) && !k.startsWith("bad_"))
+      : [];
+  const aggregatedBadOverlayKeys =
+    aggregatedData.length > 0 && chartData.length > 0
+      ? Object.keys(chartData[0]).filter((k) => k.startsWith("bad_"))
+      : [];
 
   const chartsByBuilding = useMemo(() => {
     if (selectedBuildingId !== "all" || aggregatedData.length === 0) return [];
@@ -312,6 +411,36 @@ function App() {
     }));
   }, [selectedBuildingId, aggregatedData, metricMode, valuePrefix]);
 
+  useEffect(() => {
+    setChartZoomStart(0);
+    setChartZoomEnd(chartData.length);
+  }, [chartData.length]);
+
+  const visibleChartData = useMemo(
+    () => chartData.slice(chartZoomStart, chartZoomEnd),
+    [chartData, chartZoomStart, chartZoomEnd]
+  );
+
+  const handleChartZoomIn = () => {
+    const len = chartZoomEnd - chartZoomStart;
+    if (len <= 1) return;
+    const step = Math.max(1, Math.floor(len * 0.1));
+    setChartZoomStart((s) => s + step);
+    setChartZoomEnd((e) => e - step);
+  };
+  const handleChartZoomOut = () => {
+    const len = chartData.length;
+    if (len === 0) return;
+    const currentLen = chartZoomEnd - chartZoomStart;
+    const step = Math.max(1, Math.floor(currentLen * 0.1));
+    setChartZoomStart((s) => Math.max(0, s - step));
+    setChartZoomEnd((e) => Math.min(len, e + step));
+  };
+  const handleChartZoomReset = () => {
+    setChartZoomStart(0);
+    setChartZoomEnd(chartData.length);
+  };
+
   const chartDataKey = metricMode === "delta" ? "delta" : "value";
   const yAxisLabel = useMemo(() => {
     const unit = PREFIXES.find((p) => p.value === valuePrefix)?.label || "kWh";
@@ -323,11 +452,18 @@ function App() {
       style={{
         fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
         padding: "1.5rem",
-        maxWidth: "960px",
+        maxWidth: "1200px",
         margin: "0 auto"
       }}
     >
-      <h2 style={{ marginBottom: "1rem" }}>CenEMS Telemetry Viewer</h2>
+      <h2 style={{ marginBottom: "0.5rem" }}>CenEMS Telemetry Viewer</h2>
+      <p style={{ marginBottom: "1rem", fontSize: "0.9rem", color: "#555", maxWidth: "720px" }}>
+        View energy (kWh) by <strong>Building</strong> and <strong>Device</strong>. Use <strong>Time range</strong> to filter data (or &quot;All time&quot;). 
+        The <strong>Time-series</strong> chart shows values or deltas with <strong>Zoom in/out</strong> and <strong>Reset</strong>. 
+        <strong>Bad records</strong> (e.g. unknown units) can be shown or hidden in the chart and table. 
+        <strong>Latest readings</strong> lists recent measurements with quality flags; <strong>Total</strong> is the sum of deltas in the selected range. 
+        <strong>Scale</strong> (kWh / MWh / GWh) and <strong>Mode</strong> (raw value vs delta) apply to the chart and totals.
+      </p>
 
       {error && (
         <div style={{ color: "red", marginBottom: "1rem" }}>
@@ -335,14 +471,15 @@ function App() {
         </div>
       )}
 
-      <div
-        style={{
-          display: "flex",
-          gap: "1rem",
-          marginBottom: "1rem",
-          flexWrap: "wrap"
-        }}
-      >
+      <div style={{ display: "flex", gap: "2rem", alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div style={{ flex: "0 0 260px", minWidth: 200 }}>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "1rem"
+            }}
+          >
         <div>
           <label>
             <strong>Building</strong>
@@ -424,6 +561,12 @@ function App() {
                     onChange={(e) => onDateChange("start", e.target.value)}
                     style={{ padding: "4px 8px", borderRadius: 4, border: "1px solid #ccc" }}
                   />
+                  <input
+                    type="time"
+                    value={timeStart}
+                    onChange={(e) => setTimeStart(e.target.value)}
+                    style={{ padding: "4px 8px", borderRadius: 4, border: "1px solid #ccc" }}
+                  />
                   <span style={{ color: "#666" }}>–</span>
                   <input
                     type="date"
@@ -431,52 +574,28 @@ function App() {
                     onChange={(e) => onDateChange("end", e.target.value)}
                     style={{ padding: "4px 8px", borderRadius: 4, border: "1px solid #ccc" }}
                   />
+                  <input
+                    type="time"
+                    value={timeEnd}
+                    onChange={(e) => setTimeEnd(e.target.value)}
+                    style={{ padding: "4px 8px", borderRadius: 4, border: "1px solid #ccc" }}
+                  />
                 </>
               )}
-              <div style={{ display: "flex", gap: "0.25rem" }}>
-                <button
-                  type="button"
-                  onClick={() => applyPreset("7d")}
-                  style={{
-                    padding: "4px 8px",
-                    fontSize: "0.85rem",
-                    background: activePreset === "7d" ? "#e0f2fe" : "transparent",
-                    border: "1px solid #ccc",
-                    borderRadius: 4,
-                    cursor: "pointer"
-                  }}
-                >
-                  Last 7d
-                </button>
-                <button
-                  type="button"
-                  onClick={() => applyPreset("30d")}
-                  style={{
-                    padding: "4px 8px",
-                    fontSize: "0.85rem",
-                    background: activePreset === "30d" ? "#e0f2fe" : "transparent",
-                    border: "1px solid #ccc",
-                    borderRadius: 4,
-                    cursor: "pointer"
-                  }}
-                >
-                  Last 30d
-                </button>
-                <button
-                  type="button"
-                  onClick={() => applyPreset("all")}
-                  style={{
-                    padding: "4px 8px",
-                    fontSize: "0.85rem",
-                    background: activePreset === "all" ? "#e0f2fe" : "transparent",
-                    border: "1px solid #ccc",
-                    borderRadius: 4,
-                    cursor: "pointer"
-                  }}
-                >
-                  All time
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setAllTime((a) => !a)}
+                style={{
+                  padding: "4px 8px",
+                  fontSize: "0.85rem",
+                  background: allTime ? "#e0f2fe" : "transparent",
+                  border: "1px solid #ccc",
+                  borderRadius: 4,
+                  cursor: "pointer"
+                }}
+              >
+                All time
+              </button>
             </div>
           </label>
         </div>
@@ -497,9 +616,182 @@ function App() {
             </select>
           </label>
         </div>
+
+        <div>
+          <label>
+            <strong>Total</strong>
+            <br />
+            <span style={{ padding: "4px 8px", display: "inline-block", minWidth: 120 }}>
+              {sumDeltas != null
+                ? `${(sumDeltas / valuePrefix).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${PREFIXES.find((p) => p.value === valuePrefix)?.label || "kWh"}`
+                : "—"}
+            </span>
+          </label>
+        </div>
+
+        <div>
+          <label>
+            <strong>Bad records</strong>
+            <br />
+            <select
+              value={badRecordsOption}
+              onChange={(e) => setBadRecordsOption(e.target.value)}
+              style={{ padding: "4px 8px", borderRadius: 4, border: "1px solid #ccc" }}
+            >
+              <option value="show">Show</option>
+              <option value="hide">Hide</option>
+            </select>
+          </label>
+        </div>
+          </div>
+        </div>
+
+        <div style={{ flex: "1", minWidth: 320 }}>
+      <section>
+        <h3>Time-series</h3>
+        {loading && <p style={{ color: "#555" }}>Loading…</p>}
+        {!loading && chartData.length === 0 ? (
+          <p style={{ color: "#555" }}>No data to display.</p>
+        ) : selectedBuildingId === "all" && chartsByBuilding.length === 1 && chartsByBuilding[0].buildingName === "Total" ? (
+          <div style={{ color: "#666", padding: "1rem", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb" }}>
+            <p style={{ margin: 0 }}>Backend needs a restart to show per-building charts. Run:</p>
+            <code style={{ display: "inline-block", marginTop: 6, padding: "4px 8px", background: "#fff", borderRadius: 4, fontSize: "0.9em" }}>
+              docker-compose up --build
+            </code>
+            <p style={{ margin: "8px 0 0", fontSize: "0.9em" }}>Then refresh the page.</p>
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.5rem", flexWrap: "wrap" }}>
+              <span style={{ fontSize: "0.9rem", color: "#555" }}>Chart zoom:</span>
+              <button
+                type="button"
+                onClick={handleChartZoomIn}
+                disabled={chartData.length <= 1 || chartZoomEnd - chartZoomStart <= 1}
+                style={{ padding: "4px 10px", borderRadius: 4, border: "1px solid #ccc", background: "#f5f5f5", cursor: "pointer" }}
+              >
+                Zoom in
+              </button>
+              <button
+                type="button"
+                onClick={handleChartZoomOut}
+                disabled={chartData.length === 0 || (chartZoomStart === 0 && chartZoomEnd === chartData.length)}
+                style={{ padding: "4px 10px", borderRadius: 4, border: "1px solid #ccc", background: "#f5f5f5", cursor: "pointer" }}
+              >
+                Zoom out
+              </button>
+              <button
+                type="button"
+                onClick={handleChartZoomReset}
+                disabled={chartData.length === 0 || (chartZoomStart === 0 && chartZoomEnd === chartData.length)}
+                style={{ padding: "4px 10px", borderRadius: 4, border: "1px solid #ccc", background: "#f5f5f5", cursor: "pointer" }}
+              >
+                Reset
+              </button>
+              {chartData.length > 0 && (
+                <span style={{ fontSize: "0.85rem", color: "#666" }}>
+                  Showing {chartZoomEnd - chartZoomStart} of {chartData.length} points
+                </span>
+              )}
+            </div>
+            <div style={{ width: "100%", height: 400 }}>
+            <ResponsiveContainer>
+              <LineChart data={visibleChartData} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="tsLabel" />
+                <YAxis label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }} />
+                <Tooltip
+                  content={({ active, payload }) => {
+                    if (!active || !payload?.length) return null;
+                    const p = payload[0].payload;
+                    const shown = payload.filter((entry) => entry.value != null && entry.dataKey !== "lateValue");
+                    const getColor = (entry) =>
+                      entry.dataKey?.startsWith("bad_") ? "#9ca3af" : (entry.color ?? (aggregatedChartKeys.length ? CHART_COLORS[aggregatedChartKeys.indexOf(entry.dataKey) % CHART_COLORS.length] : "#333"));
+                    return (
+                      <div style={{ background: "#fff", border: "1px solid #ccc", borderRadius: 4, padding: "8px 12px", boxShadow: "0 2px 8px rgba(0,0,0,0.1)" }}>
+                        <div style={{ fontSize: "0.85em", color: "#666" }}>{p.tsLabel}</div>
+                        {p.id != null && <div style={{ fontSize: "0.85em", color: "#666" }}>id: {p.id}</div>}
+                        {p.is_late && <div style={{ fontWeight: 600, color: "#dc2626" }}>Late</div>}
+                        {shown.map((entry) => (
+                          <div key={entry.dataKey} style={{ color: getColor(entry) }}>
+                            {entry.name}: {Number(entry.value).toLocaleString()}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  }}
+                />
+                <Legend />
+                {aggregatedData.length > 0 && chartData.length > 0 ? (
+                  <>
+                    {aggregatedChartKeys.map((key, i) => (
+                      <Line
+                        key={key}
+                        type="monotone"
+                        dataKey={key}
+                        stroke={CHART_COLORS[i % CHART_COLORS.length]}
+                        dot={false}
+                        connectNulls
+                        name={key}
+                      />
+                    ))}
+                    {aggregatedBadOverlayKeys.map((key) => (
+                      <Line
+                        key={key}
+                        type="monotone"
+                        dataKey={key}
+                        stroke="none"
+                        dot={{ r: 4, fill: "#9ca3af" }}
+                        connectNulls
+                        name={"Bad: " + key.replace("bad_", "")}
+                        isAnimationActive={false}
+                      />
+                    ))}
+                  </>
+                ) : (
+                  <>
+                    <Line
+                      type="monotone"
+                      dataKey={chartData.length > 0 && "mainValue" in chartData[0] ? "mainValue" : chartDataKey}
+                      stroke="#2563eb"
+                      dot={false}
+                      connectNulls
+                      name={metricMode === "delta" ? "Delta" : "Value"}
+                    />
+                    {showBadRecords && chartData.some((d) => d.badValue != null) && (
+                      <Line
+                        type="monotone"
+                        dataKey="badValue"
+                        stroke="none"
+                        dot={{ r: 4, fill: "#9ca3af" }}
+                        connectNulls
+                        name="Bad"
+                        isAnimationActive={false}
+                      />
+                    )}
+                    {chartData.some((d) => d.lateValue != null) && (
+                      <Line
+                        type="monotone"
+                        dataKey="lateValue"
+                        stroke="none"
+                        dot={{ r: 4, fill: "#dc2626" }}
+                        connectNulls
+                        name="Late"
+                        isAnimationActive={false}
+                      />
+                    )}
+                  </>
+                )}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          </>
+        )}
+      </section>
+        </div>
       </div>
 
-      <section style={{ marginBottom: "1.5rem" }}>
+      <section style={{ marginTop: "1.5rem", width: "100%" }}>
         <h3>Latest readings</h3>
         {selectedDeviceId === "all" ? (
           <p style={{ color: "#555" }}>Select a device to view latest readings.</p>
@@ -527,18 +819,18 @@ function App() {
               >
                 <thead style={{ position: "sticky", top: 0, background: "#f5f5f5" }}>
                   <tr>
-                    <th align="left" style={{ width: "15%" }}>Metric</th>
+                    <th align="left" style={{ width: "12%" }}>id</th>
                     <th align="left" style={{ width: "22%" }}>Timestamp</th>
                     <th align="right" style={{ width: "12%" }}>Value</th>
                     <th align="left" style={{ width: "8%" }}>Unit</th>
                     <th align="right" style={{ width: "12%", paddingRight: "1rem" }}>Delta</th>
-                    <th align="left" style={{ width: "31%", paddingLeft: "1rem" }}>Quality Flags</th>
+                    <th align="left" style={{ width: "34%", paddingLeft: "1rem" }}>Quality Flags</th>
                   </tr>
                 </thead>
                 <tbody>
                   {paginatedRecent.map((m, i) => (
-                    <tr key={`${m.ts}-${m.metric}-${i}`}>
-                      <td>{m.metric}</td>
+                    <tr key={m.id != null ? m.id : `${m.ts}-${m.metric}-${i}`}>
+                      <td>{m.id != null ? m.id : "—"}</td>
                       <td>{new Date(m.ts).toLocaleString()}</td>
                       <td align="right">{m.value.toFixed(3)}</td>
                       <td>{m.unit}</td>
@@ -571,113 +863,6 @@ function App() {
               </span>
             </div>
           </>
-        )}
-      </section>
-
-      <section>
-        <h3>Time-series</h3>
-        {loading && <p style={{ color: "#555" }}>Loading…</p>}
-        {!loading && chartData.length === 0 && chartsByBuilding.length === 0 ? (
-          <p style={{ color: "#555" }}>No data to display.</p>
-        ) : selectedBuildingId === "all" && chartsByBuilding.length === 1 && chartsByBuilding[0].buildingName === "Total" ? (
-          <div style={{ color: "#666", padding: "1rem", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb" }}>
-            <p style={{ margin: 0 }}>Backend needs a restart to show per-building charts. Run:</p>
-            <code style={{ display: "inline-block", marginTop: 6, padding: "4px 8px", background: "#fff", borderRadius: 4, fontSize: "0.9em" }}>
-              docker-compose up --build
-            </code>
-            <p style={{ margin: "8px 0 0", fontSize: "0.9em" }}>Then refresh the page.</p>
-          </div>
-        ) : selectedBuildingId === "all" && chartsByBuilding.length > 0 ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: "2rem" }}>
-            {chartsByBuilding.map(({ buildingName, data }, idx) => {
-              const color = CHART_COLORS[idx % CHART_COLORS.length];
-              const dataKey = metricMode === "delta" ? "delta" : "value";
-              return (
-                <div key={buildingName}>
-                  <h4 style={{ marginBottom: "0.5rem", color }}>
-                    {buildingName} (sum of all sensors)
-                  </h4>
-                  <div style={{ width: "100%", height: 280 }}>
-                    <ResponsiveContainer>
-                      <LineChart data={data} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="tsLabel" />
-                        <YAxis label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }} />
-                        <Tooltip
-                          content={({ active, payload }) =>
-                            active && payload?.[0] ? (
-                              <div
-                                style={{
-                                  background: "#fff",
-                                  border: "1px solid #ccc",
-                                  borderRadius: 4,
-                                  padding: "8px 12px",
-                                  boxShadow: "0 2px 8px rgba(0,0,0,0.1)"
-                                }}
-                              >
-                                <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                                  {payload[0].payload.building}
-                                </div>
-                                <div>
-                                  {metricMode === "delta" ? "Delta" : "Value"}:{" "}
-                                  {payload[0].value?.toLocaleString()} {PREFIXES.find((p) => p.value === valuePrefix)?.label || "kWh"}
-                                </div>
-                                <div style={{ fontSize: "0.85em", color: "#666" }}>
-                                  {payload[0].payload.tsLabel}
-                                </div>
-                              </div>
-                            ) : null
-                          }
-                        />
-                        <Legend />
-                        <Line
-                          type="monotone"
-                          dataKey={dataKey}
-                          stroke={color}
-                          dot={false}
-                          name={buildingName}
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div style={{ width: "100%", height: 320 }}>
-            <ResponsiveContainer>
-              <LineChart data={chartData} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="tsLabel" />
-                <YAxis label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }} />
-                <Tooltip />
-                <Legend />
-                {aggregatedData.length > 0 && chartData.length > 0 && selectedBuildingId !== "all" ? (
-                  Object.keys(chartData[0])
-                    .filter((k) => !["ts", "tsLabel"].includes(k))
-                    .map((key, i) => (
-                      <Line
-                        key={key}
-                        type="monotone"
-                        dataKey={key}
-                        stroke={["#2563eb", "#16a34a", "#dc2626"][i % 3]}
-                        dot={false}
-                        name={key}
-                      />
-                    ))
-                ) : (
-                  <Line
-                    type="monotone"
-                    dataKey={chartDataKey}
-                    stroke="#2563eb"
-                    dot={false}
-                    name={metricMode === "delta" ? "Delta" : "Value"}
-                  />
-                )}
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
         )}
       </section>
     </div>

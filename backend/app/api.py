@@ -23,6 +23,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
+def _parse_exclude_bad(value: str) -> bool:
+    """Return True to exclude bad records (filter to is_bad=0), False to include them."""
+    if not value or not isinstance(value, str):
+        return True
+    v = value.strip().lower()
+    if v in ("0", "false", "no"):
+        return False
+    return v in ("1", "true", "yes")
+
 # Known energy units (case-insensitive)
 _ENERGY_UNITS_WH = frozenset({"wh"})
 _ENERGY_UNITS_KWH = frozenset({"kwh"})
@@ -42,7 +52,8 @@ def _canonical_metric_and_unit(metric: str, unit: str) -> Tuple[str, str, bool, 
             return "energy_kwh_total", "kWh", False, False  # no conversion
         if u in _ENERGY_UNITS_WH:
             return "energy_kwh_total", "kWh", True, False  # converted
-        return m, unit, False, True  # unknown unit -> is_bad
+        # unknown unit (e.g. kals): store under same metric so UI "Total" + "Show bad" can show them
+        return "energy_kwh_total", unit, False, True  # is_bad
     return m, unit, False, False
 
 
@@ -73,6 +84,7 @@ def _compute_dedupe_key(
 
 @router.get("/health", response_model=HealthResponse)
 async def health(session: AsyncSession = Depends(get_session_dep)) -> HealthResponse:
+    """Check service and database connectivity. Returns 503 if the DB is unavailable."""
     try:
         await session.execute(text(load_sql("health_check.sql")))
     except Exception as exc:
@@ -82,6 +94,7 @@ async def health(session: AsyncSession = Depends(get_session_dep)) -> HealthResp
 
 
 async def _get_or_create_building(session: AsyncSession, name: str) -> str:
+    """Resolve building by name; create and return id if not found."""
     row = (
         await session.execute(
             text(load_sql("buildings_select_by_name.sql")),
@@ -104,6 +117,7 @@ async def _get_or_create_device(
     external_id: str,
     name: Optional[str],
 ) -> str:
+    """Resolve device by external_id within the building; create and return id if not found."""
     row = (
         await session.execute(
             text(load_sql("devices_select_by_external_id.sql")),
@@ -125,6 +139,7 @@ async def ingest(
     payload: IngestRequest,
     session: AsyncSession = Depends(get_session_dep),
 ) -> dict:
+    """Accept telemetry payload: create or resolve building/device, store raw events and normalized measurements. Returns 202 when accepted."""
     building_id = await _get_or_create_building(session, payload.building.name)
     device_id = await _get_or_create_device(
         session,
@@ -215,6 +230,7 @@ async def ingest(
 async def list_buildings(
     session: AsyncSession = Depends(get_session_dep),
 ) -> List[Building]:
+    """Return all buildings."""
     rows = (await session.execute(text(load_sql("buildings_list.sql")))).mappings().all()
     return [Building(id=str(r["id"]), name=r["name"]) for r in rows]
 
@@ -224,6 +240,7 @@ async def list_devices(
     building_id: str,
     session: AsyncSession = Depends(get_session_dep),
 ) -> List[Device]:
+    """Return all devices for the given building."""
     rows = (
         await session.execute(
             text(load_sql("devices_list_for_building.sql")),
@@ -242,10 +259,12 @@ async def list_devices(
 
 
 def _row_to_measurement(r) -> Measurement:
+    """Map a DB row (mappings result) to a Measurement model."""
     ts_val = r["ts"]
     if isinstance(ts_val, str):
         ts_val = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
     return Measurement(
+        id=int(r["id"]) if r.get("id") is not None else None,
         ts=ts_val,
         metric=r["metric"],
         value=float(r["value"]),
@@ -264,6 +283,7 @@ async def latest_measurements(
     device_id: str,
     session: AsyncSession = Depends(get_session_dep),
 ) -> List[Measurement]:
+    """Return the latest measurement per metric for the given device."""
     rows = (
         await session.execute(
             text(load_sql("measurements_latest_per_metric.sql")),
@@ -277,9 +297,10 @@ async def latest_measurements(
 async def all_devices(
     session: AsyncSession = Depends(get_session_dep),
 ) -> List[Measurement]:
+    """Return latest measurements across all devices (for debugging)."""
     rows = (
         await session.execute(
-            text(load_sql("devices_all.sql")),
+            text(load_sql("measurements_all_devices_recent.sql")),
         )
     ).mappings().all()
     return [_row_to_measurement(r) for r in rows]
@@ -291,12 +312,22 @@ async def recent_measurements(
     metric: str = Query(...),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    exclude_bad: str = Query("true", description="Exclude is_bad records: 'true' or 'false'"),
     session: AsyncSession = Depends(get_session_dep),
 ) -> List[Measurement]:
+    """Return recent measurements for the device and metric, with optional pagination and bad-record filtering."""
+    exclude_bad_bool = _parse_exclude_bad(exclude_bad)
+    bad_filter = " AND is_bad = 0" if exclude_bad_bool else ""
+    # Include legacy bad energy rows (metric='energy', is_bad=1) when asking for energy_kwh_total with Show bad
+    if metric == "energy_kwh_total" and not exclude_bad_bool:
+        metric_condition = "(metric = :metric OR (metric = 'energy' AND is_bad = 1))"
+    else:
+        metric_condition = "metric = :metric"
+    sql = load_sql("measurements_recent.sql").replace("{bad_filter}", bad_filter).replace("{metric_condition}", metric_condition)
     rows = (
         await session.execute(
-            text(load_sql("measurements_recent.sql")),
-            {"device_id": device_id, "limit": limit, "offset": offset},
+            text(sql),
+            {"device_id": device_id, "metric": metric, "limit": limit, "offset": offset},
         )
     ).mappings().all()
     return [_row_to_measurement(r) for r in rows]
@@ -305,17 +336,20 @@ async def recent_measurements(
 @router.get("/timeseries", response_model=List[Measurement])
 async def timeseries(
     device_id: str = Query(...),
-    # metric: str = Query(...),
+    metric: str = Query("energy_kwh_total"),
     start: Optional[datetime] = Query(None),
     end: Optional[datetime] = Query(None),
-    exclude_bad: bool = Query(True, description="Exclude is_bad records from timeseries"),
+    exclude_bad: str = Query("true", description="Exclude is_bad records: 'true' or 'false'"),
     session: AsyncSession = Depends(get_session_dep),
 ) -> List[Measurement]:
-    # conditions = ["device_id = :device_id", "metric = :metric"]
-    # params: dict = {"device_id": device_id, "metric": metric}
-
-    conditions = ["device_id = :device_id"]
-    params: dict = {"device_id": device_id}
+    """Return time-ordered measurements for a device (and optional metric), optionally filtered by start/end and bad records."""
+    exclude_bad_bool = _parse_exclude_bad(exclude_bad)
+    # Include legacy bad energy rows (metric='energy', is_bad=1) when asking for energy_kwh_total with Show bad
+    if metric == "energy_kwh_total" and not exclude_bad_bool:
+        conditions = ["device_id = :device_id", "(metric = :metric OR (metric = 'energy' AND is_bad = 1))"]
+    else:
+        conditions = ["device_id = :device_id", "metric = :metric"]
+    params: dict = {"device_id": device_id, "metric": metric}
 
     if start is not None:
         conditions.append("ts >= :start")
@@ -323,7 +357,7 @@ async def timeseries(
     if end is not None:
         conditions.append("ts <= :end")
         params["end"] = end.isoformat()
-    if exclude_bad:
+    if exclude_bad_bool:
         conditions.append("is_bad = 0")
 
     where_clause = " AND ".join(conditions)
@@ -339,52 +373,125 @@ async def timeseries_aggregated(
     device_id: str = Query("all", description="Device ID or 'all' for all devices in building"),
     start: Optional[datetime] = Query(None),
     end: Optional[datetime] = Query(None),
-    exclude_bad: bool = Query(True),
+    exclude_bad: str = Query("true", description="Exclude is_bad: 'true' or 'false'"),
     session: AsyncSession = Depends(get_session_dep),
 ) -> List[dict]:
     """
-    Aggregated timeseries: sum of energy by time.
-    - building_id=all, device_id=all: one series = sum across all buildings
-    - building_id=X, device_id=all: one series = sum across all devices in building X
-    - building_id=all: one series per building
+    Aggregated timeseries: sum of value/delta by time. Bad records are always excluded from
+    the sum so that totals and chart lines are not affected; use /timeseries/aggregated_bad_points
+    to fetch bad points for display only.
+    - building_id=all: one series per building (label = building name).
+    - building_id=X, device_id=all: one series for that building (label = Total).
     """
-    extra = "m.is_bad = 0" if exclude_bad else ""
-    params = {}
-    if start:
-        params["start"] = start.isoformat()
-    if end:
-        params["end"] = end.isoformat()
+    # Always exclude bad from aggregation so sums and chart lines are good-only
+    filter_clause, params = _build_aggregated_filter(
+        True, start, end, "m", metric=metric, include_legacy_bad_energy=False
+    )
 
     if building_id == "all":
-        sql = f"""
-            SELECT m.ts, b.name AS label, SUM(m.value) AS value, SUM(COALESCE(m.delta, 0)) AS delta
-            FROM measurements m
-            JOIN devices d ON d.id = m.device_id
-            JOIN buildings b ON b.id = d.building_id
-            WHERE {extra}
-        """
-        if start:
-            sql += " AND m.ts >= :start"
-        if end:
-            sql += " AND m.ts <= :end"
-        sql += " GROUP BY m.ts, d.building_id, b.name ORDER BY m.ts, d.building_id"
+        sql = load_sql("timeseries_aggregated_all_buildings.sql").format(filter_clause=filter_clause)
         rows = (await session.execute(text(sql), params)).mappings().all()
         return [{"ts": r["ts"], "value": float(r["value"]), "delta": float(r["delta"] or 0), "label": r["label"]} for r in rows]
 
     if device_id == "all":
-        sql = f"""
-            SELECT m.ts, SUM(m.value) AS value, SUM(COALESCE(m.delta, 0)) AS delta
-            FROM measurements m
-            JOIN devices d ON d.id = m.device_id
-            WHERE d.building_id = :building_id 
-        """
         params["building_id"] = building_id
-        if start:
-            sql += " AND m.ts >= :start"
-        if end:
-            sql += " AND m.ts <= :end"
-        sql += " GROUP BY m.ts ORDER BY m.ts"
+        sql = load_sql("timeseries_aggregated_one_building.sql").format(filter_clause=filter_clause)
         rows = (await session.execute(text(sql), params)).mappings().all()
         return [{"ts": r["ts"], "value": float(r["value"]), "delta": float(r["delta"] or 0), "label": "Total"} for r in rows]
 
     return []
+
+
+@router.get("/timeseries/aggregated_bad_points", response_model=List[dict])
+async def timeseries_aggregated_bad_points(
+    building_id: str = Query(..., description="Building ID; only 'all' is supported"),
+    metric: str = Query("energy_kwh_total"),
+    start: Optional[datetime] = Query(None),
+    end: Optional[datetime] = Query(None),
+    session: AsyncSession = Depends(get_session_dep),
+) -> List[dict]:
+    """
+    Return bad records only (is_bad=1) for overlay on the aggregated chart. Does not affect
+    sums or calculations. Used when Building=All and user chooses to show bad records.
+    """
+    if building_id != "all":
+        return []
+    time_parts = []
+    params: dict = {"metric": metric}
+    if start is not None:
+        time_parts.append("AND m.ts >= :start")
+        params["start"] = start.isoformat()
+    if end is not None:
+        time_parts.append("AND m.ts <= :end")
+        params["end"] = end.isoformat()
+    time_filter = " ".join(time_parts)
+    sql = load_sql("timeseries_aggregated_bad_points.sql").replace("{time_filter}", time_filter)
+    rows = (await session.execute(text(sql), params)).mappings().all()
+    return [
+        {"ts": r["ts"], "label": r["label"], "value": float(r["value"]), "delta": float(r["delta"] or 0)}
+        for r in rows
+    ]
+
+
+def _build_aggregated_filter(
+    exclude_bad: bool,
+    start: Optional[datetime],
+    end: Optional[datetime],
+    table_alias: str = "m",
+    metric: Optional[str] = None,
+    include_legacy_bad_energy: bool = False,
+) -> Tuple[str, dict]:
+    """Build filter clause and params for aggregated/sum_deltas queries. Returns (filter_clause, params)."""
+    prefix = table_alias + "." if table_alias else ""
+    filter_parts = []
+    params = {}
+    if metric is not None:
+        if include_legacy_bad_energy:
+            filter_parts.append(f"AND ({prefix}metric = :metric OR ({prefix}metric = 'energy' AND {prefix}is_bad = 1))")
+        else:
+            filter_parts.append(f"AND {prefix}metric = :metric")
+        params["metric"] = metric
+    if exclude_bad:
+        filter_parts.append(f"AND {prefix}is_bad = 0")
+    if start is not None:
+        filter_parts.append(f"AND {prefix}ts >= :start")
+        params["start"] = start.isoformat()
+    if end is not None:
+        filter_parts.append(f"AND {prefix}ts <= :end")
+        params["end"] = end.isoformat()
+    return " ".join(filter_parts), params
+
+
+@router.get("/timeseries/sum_deltas", response_model=dict)
+async def timeseries_sum_deltas(
+    building_id: str = Query(..., description="Building ID or 'all'"),
+    device_id: str = Query("all"),
+    metric: str = Query("energy_kwh_total"),
+    start: Optional[datetime] = Query(None),
+    end: Optional[datetime] = Query(None),
+    exclude_bad: str = Query("true", description="Exclude is_bad: 'true' or 'false'"),
+    session: AsyncSession = Depends(get_session_dep),
+) -> dict:
+    """Return the sum of deltas in the given time range. Bad records are always excluded."""
+    # Always exclude bad so the total is not affected by bad data
+    if building_id == "all":
+        filter_clause, params = _build_aggregated_filter(
+            True, start, end, "m", metric=metric, include_legacy_bad_energy=False
+        )
+        sql = load_sql("timeseries_sum_deltas_all_buildings.sql").format(filter_clause=filter_clause)
+        row = (await session.execute(text(sql), params)).mappings().first()
+    elif device_id == "all":
+        filter_clause, params = _build_aggregated_filter(
+            True, start, end, "m", metric=metric, include_legacy_bad_energy=False
+        )
+        params["building_id"] = building_id
+        sql = load_sql("timeseries_sum_deltas_one_building.sql").format(filter_clause=filter_clause)
+        row = (await session.execute(text(sql), params)).mappings().first()
+    else:
+        filter_clause, params = _build_aggregated_filter(True, start, end, "")
+        params["device_id"] = device_id
+        params["metric"] = metric
+        metric_condition = "metric = :metric"
+        sql = load_sql("timeseries_sum_deltas_one_device.sql").replace("{metric_condition}", metric_condition).format(filter_clause=filter_clause)
+        row = (await session.execute(text(sql), params)).mappings().first()
+    return {"sum_delta": float(row["sum_delta"] or 0)}

@@ -12,7 +12,21 @@ This project implements a small telemetry ingestion and normalization service fo
 - **Derived metrics**:
   - `recompute_energy_deltas.sql` recomputes deltas in timestamp order. Negative deltas are recorded as 0 with `is_reset=1`.
   - Unit conversion is case-insensitive (Wh/kWh). Unknown units set `is_bad=1`.
-- **Frontend**: Vite + React UI with buildings/devices, latest readings (Quality Flags), time-series chart, and aggregated views (All buildings / All devices).
+- **Frontend**: Vite + React UI with Building/Device filters, **Energy** metric only, time range, time-series chart (with zoom), bad records toggle, latest readings table, and aggregated views (All buildings).
+
+### Main logic and features (with justification)
+
+| Feature | What it does | Justification |
+|--------|----------------|---------------|
+| **Ingestion & normalization** | `POST /ingest` stores raw events and writes normalized measurements (canonical metric `energy_kwh_total`, Wh→kWh). | Keeps raw data for audit; one canonical series for queries and UI. |
+| **Quality flags** | Each measurement has `is_normal` (unit converted), `is_reset` (negative delta zeroed), `is_duplicate`, `is_late` (out-of-order), `is_bad` (unknown unit). | Lets users and APIs filter or highlight suspect data without losing it. |
+| **Bad records** | Unknown units (e.g. kals) set `is_bad=1` and are stored under `energy_kwh_total`; legacy rows with `metric='energy'` are treated as same series when “Show bad”. | Single energy series for UI; bad data visible or hideable; old DB rows still appear. |
+| **Time range** | Optional start/end (date + time) for timeseries, aggregated, and sum_deltas. “All time” = no filter. | Focus on a window; totals and charts stay consistent with the chosen range. |
+| **Aggregated views** | Building=All: one line per building (sum of devices); Building=X: one “Total” line. Queries filter by `energy_kwh_total` (and legacy bad when including bad). | Avoids mixing other metrics; stable colours and no fake gaps (connectNulls + metric filter). |
+| **Chart zoom** | Zoom in/out and Reset over the visible point range. | Large datasets remain navigable without changing the backend time range. |
+| **Total (sum of deltas)** | Sum of deltas in the selected time range for the chosen building/device. | Gives a single consumption figure for the period. |
+| **Scale (kWh / MWh / GWh)** | Divides values and totals for display only. | Readable numbers without changing stored data. |
+| **Energy-only metric** | UI exposes a single metric, Energy (`energy_kwh_total`). | Simplifies the viewer for an energy-focused use case; backend still canonicalizes multiple input metrics. |
 
 ### Running with Docker (recommended)
 
@@ -48,9 +62,10 @@ UI proxies API calls to `http://localhost:8000`.
 - `POST /ingest` – ingest building, device, and readings.
 - `GET /buildings` – list buildings.
 - `GET /buildings/{id}/devices` – list devices.
-- `GET /devices/{id}/latest` – latest readings with quality flags.
-- `GET /timeseries?device_id=...&metric=...` – time-series (excludes `is_bad` by default).
+- `GET /devices/{id}/latest` – latest reading per metric; `GET /devices/{id}/recent?metric=...&exclude_bad=...` – recent readings (paginated).
+- `GET /timeseries?device_id=...&metric=...&start=...&end=...&exclude_bad=...` – time-series (excludes `is_bad` by default).
 - `GET /timeseries/aggregated?building_id=...&device_id=...&metric=...` – aggregated energy by building or device.
+- `GET /timeseries/sum_deltas?building_id=...&device_id=...&metric=...&start=...&end=...` – sum of deltas in range.
 - `GET /health` – health check.
 
 ---
