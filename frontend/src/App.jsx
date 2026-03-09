@@ -427,8 +427,7 @@ function App() {
     >
       <h2 style={{ marginBottom: "0.5rem" }}>CenEMS Telemetry Viewer</h2>
       <p style={{ marginBottom: "1rem", fontSize: "0.9rem", color: "#555", maxWidth: "720px" }}>
-        Select <strong>Building</strong> {'->'} <strong>All</strong> to show total energy distribution across all buildings. 
-        <br />Select <strong>Device</strong> {'->'} <strong>All</strong> to show total energy consumption from all sensors. 
+        Select <strong>Building{'/'}Device</strong> {'->'} <strong>All</strong> to show average energy distribution aggregated over a 1‑hour window.
       </p>
 
       {error && (

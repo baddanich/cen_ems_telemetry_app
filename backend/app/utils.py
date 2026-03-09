@@ -82,6 +82,16 @@ class MetricNorm:
         return value
 
     @staticmethod
+    def _ts_to_iso_utc(ts: str) -> str:
+        """
+        Format SQLite datetime (UTC, no TZ) as ISO
+        with Z so frontend parses as UTC.
+        """
+        if not ts or "Z" in ts or "+" in ts:
+            return ts
+        return ts.replace(" ", "T", 1) + "Z"
+
+    @staticmethod
     def build_metric_condition(metric: str, include_legacy_bad: bool) -> str:
         """
         Build SQL fragment for metric filter. When include_legacy_bad and

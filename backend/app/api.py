@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
@@ -403,14 +404,17 @@ async def timeseries_aggregated(
     start: Optional[datetime] = Query(None),
     end: Optional[datetime] = Query(None),
     exclude_bad: str = Query("true"),
+    frequency_minutes: int = Query(60, ge=1, le=1440,
+                                   description="Time partition frequency "
+                                   "in minutes (default 60)"),
     session: AsyncSession = Depends(get_session_dep),
 ) -> List[dict]:
     """
-    Aggregated timeseries: sum of value/delta by time (good data only).
+    Aggregated timeseries: AVG(value) per time partition (good data only).
 
-    Bad records are always excluded from the sum so chart lines and totals
-    are not affected. Use `GET /timeseries/aggregated_bad_points` to fetch
-    bad points for display overlay when Building=All.
+    Partitions span min_ts to max_ts at parametrized frequency (default 30 min)
+    Bad records are excluded. Use `GET /timeseries/aggregated_bad_points`
+    for bad overlay.
 
     - `building_id=all`: one series per building (label = building name).
     - `building_id=X`, `device_id=all`: one series for that building
@@ -419,6 +423,7 @@ async def timeseries_aggregated(
     filter_clause, params = FilterBuilder.build_aggregated_filter(
         True, start, end, "m", metric=metric, include_legacy_bad_energy=False
     )
+    params["bucket_seconds"] = frequency_minutes * 60
 
     if building_id == "all":
         sql = load_sql(
@@ -429,7 +434,7 @@ async def timeseries_aggregated(
 
         return [
             {
-                "ts": r["ts"],
+                "ts": MetricNorm._ts_to_iso_utc(str(r["ts"])),
                 "value": float(r["value"]),
                 "delta": float(r["delta"] or 0),
                 "label": r["label"]
@@ -447,7 +452,7 @@ async def timeseries_aggregated(
 
         return [
             {
-                "ts": r["ts"],
+                "ts": MetricNorm._ts_to_iso_utc(str(r["ts"])),
                 "value": float(r["value"]),
                 "delta": float(r["delta"] or 0),
                 "label": "Total"
@@ -463,18 +468,22 @@ async def timeseries_aggregated_bad_points(
     metric: str = Query("energy_kwh_total"),
     start: Optional[datetime] = Query(None),
     end: Optional[datetime] = Query(None),
+    frequency_minutes: int = Query(60, ge=1, le=1440,
+                                   description="Time partition frequency"
+                                   " in minutes (default 60)"),
     session: AsyncSession = Depends(get_session_dep),
 ) -> List[dict]:
     """
     Bad records only (is_bad=1) for overlay on the aggregated chart.
 
-    Does not affect sums or calculations. Returns one row per (ts, building).
-    Used when Building=All and the user chooses to show bad records (gray dots)
+    AVG(value) per time partition per building. Used when Building=All and
+    the user chooses to show bad records (gray dots).
     """
     if building_id != "all":
         return []
     time_filter, params = FilterBuilder.build_time_filter(start, end, "m")
     params["metric"] = metric
+    params["bucket_seconds"] = frequency_minutes * 60
     sql = load_sql(
         "timeseries_aggregated_bad_points.sql"
     ).replace("{time_filter}", time_filter)
@@ -483,7 +492,7 @@ async def timeseries_aggregated_bad_points(
 
     return [
         {
-            "ts": r["ts"],
+            "ts": MetricNorm._ts_to_iso_utc(str(r["ts"])),
             "label": r["label"],
             "value": float(r["value"]),
             "delta": float(r["delta"] or 0)
