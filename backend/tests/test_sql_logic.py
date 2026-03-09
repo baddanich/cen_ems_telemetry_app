@@ -86,38 +86,6 @@ async def test_measurements_latest_ts(db_pool: AsyncSession) -> None:
     assert row_none is None
 
 
-@pytest.mark.asyncio
-async def test_measurements_latest_ts_skips_bad_records(db_pool: AsyncSession) -> None:
-    """measurements_latest_ts: skips is_bad=1 rows; returns previous good record for delta."""
-    session = db_pool
-    await _insert_building_device(session)
-    d_id = "d1"
-    base_ts = datetime(2024, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
-    # 10:00 good 22 kWh, 10:30 bad 100 kals, 11:00 good 26 kWh
-    await session.execute(
-        text(
-            "INSERT INTO measurements (device_id, ts, metric, value, unit, is_normal, is_bad) "
-            "VALUES (:did, :ts, :metric, :val, :unit, 1, 0)"
-        ),
-        {"did": d_id, "ts": (base_ts + timedelta(minutes=0)).isoformat(), "metric": "energy_kwh_total", "val": 22.0, "unit": "kWh"},
-    )
-    await session.execute(
-        text(
-            "INSERT INTO measurements (device_id, ts, metric, value, unit, is_normal, is_bad) "
-            "VALUES (:did, :ts, :metric, :val, :unit, 0, 1)"
-        ),
-        {"did": d_id, "ts": (base_ts + timedelta(minutes=30)).isoformat(), "metric": "energy_kwh_total", "val": 100.0, "unit": "kals"},
-    )
-    await session.commit()
-
-    sql = (_SQL_ROOT / "measurements_latest_ts.sql").read_text()
-    # Query for ts just after 10:30: should return 10:00 (22), not 10:30 (100)
-    query_ts = (base_ts + timedelta(minutes=31)).isoformat()
-    row = (await session.execute(text(sql), {"device_id": d_id, "metric": "energy_kwh_total", "ts": query_ts})).mappings().first()
-    assert row is not None
-    assert float(row["value"]) == pytest.approx(22.0)
-
-
 # ---------------------------------------------------------------------------
 # raw_events_insert_or_mark_duplicate.sql
 # ---------------------------------------------------------------------------

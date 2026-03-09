@@ -198,8 +198,8 @@ async def ingest(
         """ 4. Late data processing """
 
         logger.info('POST: Late data processing')
-
-        if is_late:
+        # skip re-processing for duplicates
+        if is_late and not is_duplicate:
             await IngestUtils.process_latecomer(
                 session=session,
                 device_id=device_id,

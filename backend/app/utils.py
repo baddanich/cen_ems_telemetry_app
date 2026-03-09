@@ -3,7 +3,7 @@ Shared helpers for the CenEMS API, grouped by functionality into classes.
 """
 import hashlib
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional, Tuple
 
 from sqlalchemy import text
@@ -353,6 +353,8 @@ class Mappers:
         ts_val = r["ts"]
         if isinstance(ts_val, str):
             ts_val = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
+            if ts_val.tzinfo is None:
+                ts_val = ts_val.replace(tzinfo=timezone.utc)
         return Measurement(
             id=int(r["id"]) if r.get("id") is not None else None,
             ts=ts_val,

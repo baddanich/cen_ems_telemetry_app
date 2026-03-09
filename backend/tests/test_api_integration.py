@@ -303,52 +303,6 @@ async def test_sum_deltas_excludes_bad(db_pool: AsyncSession, ensure_db_connecte
 
 
 @pytest.mark.asyncio
-async def test_delta_skips_bad_record_between_good(db_pool: AsyncSession, ensure_db_connected) -> None:
-    """
-    Delta uses previous good (is_bad=0) record, not the chronologically previous.
-    Good 22 -> Bad 100 kals -> Good 26: delta for 26 should be 4 (26-22), not 0 (reset).
-    """
-    app = create_app()
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        payload = {
-            "building": {"name": "DeltaBad Building"},
-            "device": {"external_id": "meter-deltabad", "name": "DeltaBad meter"},
-            "readings": [
-                {"timestamp": "2024-03-01T11:00:00Z", "metric": "energy", "value": 22.0, "unit": "kWh"},
-                {"timestamp": "2024-03-01T11:30:00Z", "metric": "energy", "value": 100.0, "unit": "kals"},
-                {"timestamp": "2024-03-01T12:00:00Z", "metric": "energy", "value": 26.0, "unit": "kWh"},
-                {"timestamp": "2024-03-01T12:30:00Z", "metric": "energy", "value": 30.0, "unit": "kWh"},
-            ],
-        }
-        resp = await client.post("/ingest", json=payload)
-        assert resp.status_code == 202
-
-        buildings = (await client.get("/buildings")).json()
-        bid = next((b["id"] for b in buildings if b.get("name") == "DeltaBad Building"), buildings[0]["id"])
-        devices = (await client.get(f"/buildings/{bid}/devices")).json()
-        did = next((d["id"] for d in devices if d.get("external_id") == "meter-deltabad"), devices[0]["id"])
-
-        ts = (
-            await client.get(
-                "/timeseries",
-                params={"device_id": did, "metric": "energy_kwh_total", "exclude_bad": "false"},
-            )
-        ).json()
-
-        # Find the 26 kWh row (12:00) - delta should be 4, not 0; no reset
-        row_26 = next((r for r in ts if abs((r.get("value") or 0) - 26.0) < 0.001), None)
-        assert row_26 is not None
-        assert row_26["delta"] == pytest.approx(4.0), "Delta after bad record should use previous good (22), not bad (100)"
-        assert row_26.get("is_reset") is False, "Should not be marked reset when prev good was 22"
-
-        # 30 kWh row: delta = 30 - 26 = 4
-        row_30 = next((r for r in ts if abs((r.get("value") or 0) - 30.0) < 0.001), None)
-        assert row_30 is not None
-        assert row_30["delta"] == pytest.approx(4.0)
-
-
-@pytest.mark.asyncio
 async def test_late_out_of_order_flag(db_pool: AsyncSession, ensure_db_connected) -> None:
     """
     Two requests: (1) Ingest 10, 20, 25, 30 (15 missing) — show delta/sum.

@@ -97,6 +97,27 @@ const PREFIXES = [
 
 const RECORDS_PER_PAGE = 5;
 
+/** Format timestamp in UTC (matches ingested data). */
+function formatTsUtc(ts) {
+  return new Date(ts).toLocaleTimeString(undefined, {
+    timeZone: "UTC",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  });
+}
+
+/** Format date+time in UTC for table display. */
+function formatTsUtcFull(ts) {
+  return new Date(ts).toLocaleString(undefined, {
+    timeZone: "UTC",
+    dateStyle: "short",
+    timeStyle: "medium",
+    hour12: false
+  });
+}
+
 function toDateStr(d) {
   return d.toISOString().slice(0, 10);
 }
@@ -307,7 +328,7 @@ function App() {
         const ts = r.ts;
         const label = r.label || "Total";
         allLabels.add(label);
-        if (!byTs[ts]) byTs[ts] = { tsLabel: new Date(ts).toLocaleTimeString(), ts };
+        if (!byTs[ts]) byTs[ts] = { tsLabel: formatTsUtc(ts), ts };
         byTs[ts][label] = (r[key] ?? 0) / valuePrefix;
       });
       const sortedLabels = [...allLabels].sort();
@@ -337,7 +358,7 @@ function App() {
         const val = (metricMode === "delta" ? (p.delta ?? 0) : (p.value || 0)) / valuePrefix;
         return {
           ...p,
-          tsLabel: new Date(p.ts).toLocaleTimeString(),
+          tsLabel: formatTsUtc(p.ts),
           value: (p.value || 0) / valuePrefix,
           delta: (p.delta ?? 0) / valuePrefix,
           mainValue: p.is_bad ? null : val,
@@ -369,7 +390,7 @@ function App() {
       if (!byBuilding[label]) byBuilding[label] = [];
       byBuilding[label].push({
         ts: r.ts,
-        tsLabel: new Date(r.ts).toLocaleTimeString(),
+        tsLabel: formatTsUtc(r.ts),
         building: label,
         [key]: (r[key] ?? 0) / valuePrefix
       });
@@ -798,7 +819,7 @@ function App() {
                   {paginatedRecent.map((m, i) => (
                     <tr key={m.raw_event_id != null ? m.raw_event_id : (m.id != null ? m.id : `${m.ts}-${m.metric}-${i}`)}>
                       <td>{m.id != null ? m.id : "—"}</td>
-                      <td>{new Date(m.ts).toLocaleString()}</td>
+                      <td>{formatTsUtcFull(m.ts)}</td>
                       <td align="right">{m.value.toFixed(3)}</td>
                       <td>{m.unit}</td>
                       <td align="right" style={{ paddingRight: "1rem" }}>
