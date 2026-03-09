@@ -519,10 +519,10 @@ async def timeseries_sum_deltas(
     """
     if building_id == "all":
         filter_clause, params = FilterBuilder.build_aggregated_filter(
-            True,
-            start,
-            end,
-            "m",
+            exclude_bad=True,
+            start=start,
+            end=end,
+            table_alias="m",
             metric=metric,
             include_legacy_bad_energy=False
         )
