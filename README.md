@@ -8,16 +8,15 @@ This project implements a small telemetry ingestion and normalization service fo
 - **Database**:
   - `raw_events`: as-ingested telemetry (no normalization). On duplicate `dedupe_key`, a new row is inserted with `is_duplicate=1` (no UNIQUE on `dedupe_key`); the measurement is written/updated with `is_duplicate=1`.
   - `measurements`: normalized canonical measurements with derived `delta` and quality flags (`is_normal`, `is_reset`, `is_duplicate`, `is_late`, `is_bad`).
-  - SQL schema and logic live in `sql/schema.sql`, `sql/functions.sql`, and `sql/queries/*.sql`. If you have an existing DB created before `raw_events.is_duplicate` was added, run: `ALTER TABLE raw_events ADD COLUMN is_duplicate INTEGER NOT NULL DEFAULT 0;`
-- **Derived metrics**:
-  - Energy deltas are updated incrementally: `delta = value[i] - value[i-1]` by timestamp order. For each new (including late) reading we set its delta from the closest previous point by `ts`, then recalculate and update only the next record’s delta. No full-table recompute.
-  - Negative deltas are stored as 0 with `is_reset=1`. Unit conversion is case-insensitive (Wh/kWh). Unknown units set `is_bad=1`.
+  - SQL schema and logic live in `sql/schema.sql`, and `sql/queries/*.sql`. If you have an existing DB created before `raw_events.is_duplicate` was added, run: `ALTER TABLE raw_events ADD COLUMN is_duplicate INTEGER NOT NULL DEFAULT 0;`
 - **Frontend**: Vite + React UI with Building/Device filters, **Energy** metric only, time range, time-series chart (with zoom), bad records toggle, latest readings table, and aggregated views (All buildings).
-- **Code layout**: `backend/app/api.py` — route handlers and ingest flow; `backend/app/utils.py` — helpers grouped by class: `Parsing` (query params), `MetricNorm` (canonical metric/unit, value conversion, metric condition), `IngestUtils` (dedupe key), `DbResolver` (get_or_create building/device), `FilterBuilder` (aggregated and time filters), `Mappers` (row_to_measurement). SQL in `sql/queries/*.sql`.
+- **Code layout**: `backend/app/api.py` — route handlers and ingest flow; `backend/app/utils.py` — helpers grouped by class: SQL in `sql/queries/*.sql`.
 
 ### Requirements and justifications
 
 Each requirement is listed with a short justification for why it exists.
+
+### Core
 
 | # | Requirement | Justification |
 |---|-------------|---------------|
@@ -25,18 +24,22 @@ Each requirement is listed with a short justification for why it exists.
 | R2 | **Deduplication** — Deterministic `dedupe_key`; on conflict we still return the row and set `is_duplicate=1` (raw_events and measurement). | Duplicate ingest is recorded with `is_duplicate=1` instead of dropped; idempotent and avoids double-counting in deltas/totals. |
 | R3 | **Canonical metric & unit** — Energy is normalized to `energy_kwh_total`; Wh is converted to kWh; unknown units (e.g. kals) set `is_bad=1` but are still stored. | One consistent series for queries and UI; bad data is visible or hideable instead of dropped. |
 | R4 | **Quality flags** — Each measurement has `is_normal`, `is_reset`, `is_duplicate`, `is_late`, `is_bad`. | Enables filtering and highlighting of suspect data; totals and charts can exclude bad data by default. |
-| R5 | **Incremental delta** — For each energy reading we set `delta = value - prev_value` (by ts) and update only the next record’s delta; late events use the same rule. Negative deltas → 0 with `is_reset=1`. | No full recompute; correct ordering and late arrivals with minimal updates. |
-| R6 | **Buildings & devices** — Buildings and devices are created on first use (by name / external_id). List endpoints: `GET /buildings`, `GET /buildings/{id}/devices`. | Simple hierarchy for filtering in the UI; no separate provisioning step. |
-| R7 | **Time range** — Optional start/end for timeseries, aggregated, and sum_deltas. | Lets users focus on a window; totals and charts stay consistent with the chosen range. |
-| R8 | **Recent & timeseries** — `GET /devices/{id}/recent` (paginated, newest first) and `GET /timeseries` (ascending, optional start/end). Query `exclude_bad` to include or hide bad records. | Supports "latest readings" table and time-series chart; same API serves both good-only and "show bad" views. |
-| R9 | **Aggregated views** — Building=All: one series per building; Building=X: one "Total" series. Good data only in the sum; bad points fetched separately for overlay. | Multi-building comparison and single-building total without polluting sums with bad data. |
-| R10 | **Sum of deltas** — `GET /timeseries/sum_deltas` returns total consumption in the range (good data only). | Single "Total" figure for the selected period and scope. |
-| R11 | **Health check** — `GET /health` returns 200 when DB is reachable, 503 otherwise. | Enables load balancers and orchestration to probe readiness. |
-| R12 | **UI: Building/Device filters, Energy metric, time range** — Frontend allows selecting building (or All), device, and optional start/end. | Matches backend capabilities and keeps the UI aligned with the data model. |
-| R13 | **UI: Time-series chart with zoom** — Chart shows values/deltas; zoom and Reset apply to the visible point range only. | Large datasets remain navigable without changing the backend time range on every pan/zoom. |
-| R14 | **UI: Bad records toggle** — User can show or hide bad points; Building=All uses aggregated bad points overlay (no "Bad: building" in legend). | Visibility of bad data when needed without cluttering the legend or affecting totals. |
-| R15 | **UI: Scale (kWh / MWh / GWh)** — Display scale multiplies/divides values and total for readability only. | Readable numbers without changing stored or transmitted values. |
-| R16 | **App factory in app** — `create_app()` lives in `backend/app/main.py`; production uses `app`, tests import `create_app`. | Single place for wiring lifespan and router; tests get the same app shape without duplicating app logic in conftest. |
+| R5 | **Out of order handling** — late events handling | The delta is computed using the simple relationship `delta = value[i] - value[i-1]`. The chosen strategy is to recalculate only `value[i+1]` when late updates occur, as this is the sole value affected by the delta dependency. |
+
+### UI 
+
+| # | Requirement | Justification |
+|---|-------------|---------------|
+| R1 | **Buildings & devices** — Buildings and devices are created on first use (by name / external_id). List endpoints: `GET /buildings`, `GET /buildings/{id}/devices`. | Simple hierarchy for filtering in the UI; no separate provisioning step. |
+| R2 | **Time range** — Optional start/end for timeseries, aggregated, and sum_deltas. | Lets users focus on a window; totals and charts stay consistent with the chosen range. |
+| R3 | **Recent & timeseries** — `GET /devices/{id}/recent` (paginated, newest first) and `GET /timeseries` (ascending, optional start/end). Query `exclude_bad` to include or hide bad records. | Supports "latest readings" table and time-series chart; same API serves both good-only and "show bad" views. |
+| R4 | **Aggregated views** — Building=All: one series per building; Building=X: one "Total" series. AVG(value) per time partition (parametrized `frequency_minutes`, default 60). Good data only; bad points fetched separately for overlay. Timestamps returned as ISO UTC (Z suffix) for consistent display with raw data. | Multi-building comparison and single-building total; time-aligned partitions avoid timezone drift; UTC timestamps ensure frontend parses correctly across timezones. |
+| R5 | **Sum of deltas** — `GET /timeseries/sum_deltas` returns total consumption in the range (good data only). | Single "Total" figure for the selected period and scope. |
+| R6 | **Health check** — `GET /health` returns 200 when DB is reachable, 503 otherwise. | Enables load balancers and orchestration to probe readiness. |
+| R7 | **UI: Building/Device filters, Energy metric, time range** — Frontend allows selecting building (or All), device, and optional start/end. | Matches backend capabilities and keeps the UI aligned with the data model. |
+| R8 | **UI: Time-series** — Chart shows values/deltas; zoom and Reset apply to the visible point range only. | Large datasets remain navigable without changing the backend time range on every pan/zoom. |
+| R9 | **UI: Bad records toggle** — User can show or hide bad points; Building=All uses aggregated bad points overlay (no "Bad: building" in legend). | Visibility of bad data when needed without cluttering the legend or affecting totals. |
+| R10 | **UI: Scale (kWh / MWh / GWh)** — Display scale multiplies/divides values and total for readability only. | Readable numbers without changing stored or transmitted values. |
 
 ### Running with Docker (recommended)
 
@@ -46,12 +49,14 @@ docker-compose up --build
 
 Backend runs on `http://localhost:8000` with SQLite in a Docker volume.
 
-### Running backend locally (Pipenv)
+
+### Running the frontend
 
 ```bash
-pipenv install
-pipenv run dev
+cd frontend && npm install && npm run dev
 ```
+
+UI proxies API calls to `http://localhost:5173/`.
 
 ### Running tests
 
@@ -61,17 +66,16 @@ Backend tests use pytest and the shared SQL schema; DB is in-memory SQLite. Test
 pipenv run pytest backend/tests -vv
 ```
 
-- `test_api_integration.py`: health, ingest, buildings/devices, latest, timeseries, recent with `exclude_bad`, time range filter, sum_deltas excludes bad, duplicate dedupe_key → `is_duplicate=1`, late out-of-order and incremental delta.
-- `test_sql_logic.py`: delta recomputation, reset flag, duplicate handling.
+- `test_api_integration.py`: health, ingest, buildings/devices, latest, timeseries, recent with `exclude_bad`, time range filter, sum_deltas excludes bad, duplicate dedupe_key → `is_duplicate=1`, late out-of-order and incremental delta, aggregated timeseries and aggregated_bad_points.
+- `test_sql_logic.py`: delta recomputation, reset flag, duplicate handling, aggregated timeseries (time partitions, AVG per bucket).
 - `test_utils.py`: unit tests for `Parsing`, `MetricNorm`, `IngestUtils`, `FilterBuilder`, `Mappers`, and `DbResolver` (get_or_create building/device).
 
-### Running the frontend
+### Running backend locally (Pipenv)
 
 ```bash
-cd frontend && npm install && npm run dev
+pipenv install
+pipenv run dev
 ```
-
-UI proxies API calls to `http://localhost:8000`.
 
 ### API reference
 
@@ -84,8 +88,8 @@ UI proxies API calls to `http://localhost:8000`.
 | GET | `/devices/all` | Latest measurements across all devices (debug). |
 | GET | `/devices/{device_id}/recent` | Recent measurements for device and metric; query: `metric`, `limit`, `offset`, `exclude_bad` ('true'/\'false'). Paginated, newest first. |
 | GET | `/timeseries` | Time-ordered measurements for one device; query: `device_id`, `metric`, `start`, `end`, `exclude_bad`. |
-| GET | `/timeseries/aggregated` | Sum by time (good data only); query: `building_id` ('all' or id), `device_id`, `metric`, `start`, `end`. Bad records never included in sum. |
-| GET | `/timeseries/aggregated_bad_points` | Bad records only for overlay; query: `building_id=all`, `metric`, `start`, `end`. |
+| GET | `/timeseries/aggregated` | AVG(value) per time partition (good data only); query: `building_id`, `device_id`, `metric`, `start`, `end`, `exclude_bad`, `frequency_minutes` (1–1440, default 60). Timestamps in ISO UTC. |
+| GET | `/timeseries/aggregated_bad_points` | Bad records only for overlay; query: `building_id=all`, `metric`, `start`, `end`, `frequency_minutes` (1–1440, default 60). Timestamps in ISO UTC. |
 | GET | `/timeseries/sum_deltas` | Sum of deltas in range (good data only); query: `building_id`, `device_id`, `metric`, `start`, `end`. |
 
 Backend logic lives in `backend/app/api.py` (routes and ingest flow) and `backend/app/utils.py` (parsing, normalization, filter-building). Each endpoint has a docstring in `api.py`.
