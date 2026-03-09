@@ -25,6 +25,7 @@ Each requirement is listed with a short justification for why it exists.
 | R3 | **Canonical metric & unit** — Energy is normalized to `energy_kwh_total`; Wh is converted to kWh; unknown units (e.g. kals) set `is_bad=1` but are still stored. | One consistent series for queries and UI; bad data is visible or hideable instead of dropped. |
 | R4 | **Quality flags** — Each measurement has `is_normal`, `is_reset`, `is_duplicate`, `is_late`, `is_bad`. | Enables filtering and highlighting of suspect data; totals and charts can exclude bad data by default. |
 | R5 | **Out of order handling** — late events handling | The delta is computed using the simple relationship `delta = value[i] - value[i-1]`. The chosen strategy is to recalculate only `value[i+1]` when late updates occur, as this is the sole value affected by the delta dependency. |
+| R5b | **Delta skips bad records** — When computing delta, use the previous good (`is_bad=0`) record, not the chronologically previous. | Bad records (e.g. unknown units) have nonsensical values; using them would produce negative deltas and false resets. Good→Bad→Good: delta for the last good = last_good − first_good. |
 
 ### UI 
 
@@ -66,8 +67,8 @@ Backend tests use pytest and the shared SQL schema; DB is in-memory SQLite. Test
 pipenv run pytest backend/tests -vv
 ```
 
-- `test_api_integration.py`: health, ingest, buildings/devices, latest, timeseries, recent with `exclude_bad`, time range filter, sum_deltas excludes bad, duplicate dedupe_key → `is_duplicate=1`, late out-of-order and incremental delta, aggregated timeseries and aggregated_bad_points.
-- `test_sql_logic.py`: delta recomputation, reset flag, duplicate handling, aggregated timeseries (time partitions, AVG per bucket).
+- `test_api_integration.py`: health, ingest, buildings/devices, latest, timeseries, recent with `exclude_bad`, time range filter, sum_deltas excludes bad, duplicate dedupe_key → `is_duplicate=1`, late out-of-order and incremental delta, **delta skips bad record** (good→bad→good), aggregated timeseries and aggregated_bad_points.
+- `test_sql_logic.py`: delta recomputation, reset flag, duplicate handling, **measurements_latest_ts skips is_bad rows**, aggregated timeseries (time partitions, AVG per bucket).
 - `test_utils.py`: unit tests for `Parsing`, `MetricNorm`, `IngestUtils`, `FilterBuilder`, `Mappers`, and `DbResolver` (get_or_create building/device).
 
 ### Running backend locally (Pipenv)

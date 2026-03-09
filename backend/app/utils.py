@@ -175,14 +175,13 @@ class IngestUtils:
                 },
             )
         ).mappings().first()
-        latest_value = None if not previous_row else previous_row["value"]
-        delta = None
         if previous_row:
-            if canonical_value - latest_value <= 0:
-                delta = 0.0
-            else:
-                delta = canonical_value - latest_value
-        return delta
+            latest_value = previous_row["value"]
+            delta = canonical_value - latest_value
+            delta = 0.0 if delta < 0 else delta
+            return delta
+        else:
+            return None
 
     @staticmethod
     async def process_latecomer(
@@ -206,8 +205,8 @@ class IngestUtils:
 
         if next_row is not None:
             updated_delta = float(next_row["value"]) - canonical_value
-            updated_delta = updated_delta if updated_delta >= 0 else 0.0
-            updated_reset = 1 if updated_delta < 0 else 0
+            updated_delta = 0.0 if updated_delta < 0 else updated_delta
+            updated_reset = 1 if updated_delta == 0 else 0
             await session.execute(
                 text(load_sql("measurement_update_delta.sql")),
                 {

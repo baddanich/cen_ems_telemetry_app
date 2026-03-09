@@ -132,7 +132,7 @@ async def ingest(
             raw_timestamp=reading.timestamp
         )
 
-        is_reset = 0 if delta == 0 else 1
+        is_reset = 1 if delta == 0 else 0
 
         raw_timestamp_str = reading.timestamp.isoformat()
 
