@@ -24,23 +24,23 @@ from backend.app.utils import (
 # ---------------------------------------------------------------------------
 class TestParsing:
     def test_parse_exclude_bad_true(self):
-        assert Parsing.parse_exclude_bad("true") is True
-        assert Parsing.parse_exclude_bad("True") is True
-        assert Parsing.parse_exclude_bad("1") is True
-        assert Parsing.parse_exclude_bad("yes") is True
+        assert Parsing.parse_exclude_bad("true") == 1
+        assert Parsing.parse_exclude_bad("True") == 1
+        assert Parsing.parse_exclude_bad("1") == 1
+        assert Parsing.parse_exclude_bad("yes") == 1
 
     def test_parse_exclude_bad_false(self):
-        assert Parsing.parse_exclude_bad("false") is False
-        assert Parsing.parse_exclude_bad("False") is False
-        assert Parsing.parse_exclude_bad("0") is False
-        assert Parsing.parse_exclude_bad("no") is False
+        assert Parsing.parse_exclude_bad("false") == 0
+        assert Parsing.parse_exclude_bad("False") == 0
+        assert Parsing.parse_exclude_bad("0") == 0
+        assert Parsing.parse_exclude_bad("no") == 0
 
     def test_parse_exclude_bad_empty_or_none(self):
-        assert Parsing.parse_exclude_bad("") is True
-        assert Parsing.parse_exclude_bad(None) is True  # type: ignore
+        assert Parsing.parse_exclude_bad("") == 1
+        assert Parsing.parse_exclude_bad(None) == 1  # type: ignore
 
     def test_parse_exclude_bad_unknown_defaults_exclude(self):
-        assert Parsing.parse_exclude_bad("anything") is True
+        assert Parsing.parse_exclude_bad("anything") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -51,27 +51,27 @@ class TestMetricNorm:
         m, u, is_normal, is_bad = MetricNorm.canonical_metric_and_unit("energy", "kWh")
         assert m == "energy_kwh_total"
         assert u == "kWh"
-        assert is_normal is False
-        assert is_bad is False
+        assert is_normal == 0
+        assert is_bad == 0
 
     def test_canonical_metric_wh_converted(self):
         m, u, is_normal, is_bad = MetricNorm.canonical_metric_and_unit("energy_total", "Wh")
         assert m == "energy_kwh_total"
         assert u == "kWh"
-        assert is_normal is True
-        assert is_bad is False
+        assert is_normal == 1
+        assert is_bad == 0
 
     def test_canonical_metric_unknown_unit_is_bad(self):
         m, u, is_normal, is_bad = MetricNorm.canonical_metric_and_unit("energy", "kals")
         assert m == "energy_kwh_total"
         assert u == "kals"
-        assert is_bad is True
+        assert is_bad == 1
 
     def test_canonical_metric_other_metric_passthrough(self):
         m, u, is_normal, is_bad = MetricNorm.canonical_metric_and_unit("temperature", "C")
         assert m == "temperature"
         assert u == "c"  # non-energy: unit is lowercased for consistency
-        assert is_bad is False
+        assert is_bad == 0
 
     def test_convert_value_kwh(self):
         assert MetricNorm.convert_value("energy", "kWh", 10.0) == 10.0

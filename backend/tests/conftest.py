@@ -4,7 +4,9 @@ from typing import AsyncIterator
 
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (AsyncSession,
+                                    async_sessionmaker,
+                                    create_async_engine)
 from backend.app.config import get_settings
 
 # Use shared in-memory SQLite for tests (so app and tests use same DB)
@@ -18,7 +20,10 @@ def _split_sql_statements(sql: str) -> list[str]:
     """Split SQL into individual statements (SQLite executes one at a time)."""
     statements = []
     for stmt in sql.split(";"):
-        lines = [l for l in stmt.split("\n") if not l.strip().startswith("--")]
+        lines = [
+            el for el in stmt.split("\n")
+            if not el.strip().startswith("--")
+        ]
         stmt = "\n".join(lines).strip()
         if stmt:
             statements.append(stmt)
@@ -64,13 +69,17 @@ async def db_session() -> AsyncIterator[AsyncSession]:
 
 @pytest_asyncio.fixture
 async def db_pool(db_session: AsyncSession) -> AsyncSession:
-    """Alias for compatibility with existing tests that expect db_pool."""
+    """
+    Alias for compatibility with existing tests that expect db_pool.
+    """
     return db_session
 
 
 @pytest_asyncio.fixture
 async def ensure_db_connected():
-    """Ensure the app's db module is connected (for API tests that use create_app)."""
+    """
+    Ensure the app's db module is connected
+    (for API tests that use create_app)."""
     from backend.app.db import connect
     await connect()
     yield

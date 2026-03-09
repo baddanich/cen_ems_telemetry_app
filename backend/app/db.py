@@ -2,7 +2,9 @@ import logging
 from pathlib import Path
 from typing import AsyncIterator
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (AsyncSession,
+                                    async_sessionmaker,
+                                    create_async_engine)
 from sqlalchemy import text
 from fastapi import Depends
 
@@ -41,7 +43,10 @@ def _split_sql_statements(sql: str) -> list[str]:
     """Split SQL into individual statements (SQLite executes one at a time)."""
     statements = []
     for stmt in sql.split(";"):
-        lines = [l for l in stmt.split("\n") if not l.strip().startswith("--")]
+        lines = [
+            el for el in stmt.split("\n")
+            if not el.strip().startswith("--")
+        ]
         stmt = "\n".join(lines).strip()
         if stmt:
             statements.append(stmt)
@@ -56,7 +61,9 @@ async def _run_migrations() -> None:
         sql = schema_path.read_text(encoding="utf-8")
         for stmt in _split_sql_statements(sql):
             if stmt:
-                logger.info("Applying SQL file", extra={"path": str(schema_path)})
+                logger.info(
+                    "Applying SQL file",
+                    extra={"path": str(schema_path)})
                 await session.execute(text(stmt))
         await session.commit()
 
@@ -72,5 +79,7 @@ async def get_session() -> AsyncIterator[AsyncSession]:
             await session.commit()
 
 
-def get_session_dep(session: AsyncSession = Depends(get_session)) -> AsyncSession:
+def get_session_dep(
+        session: AsyncSession = Depends(get_session)
+) -> AsyncSession:
     return session

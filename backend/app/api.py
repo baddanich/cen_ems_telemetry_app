@@ -38,18 +38,24 @@ router = APIRouter()
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health(session: AsyncSession = Depends(get_session_dep)) -> HealthResponse:
+async def health(
+    session: AsyncSession = Depends(get_session_dep)
+) -> HealthResponse:
     """
     Health check.
 
-    Returns 200 with `{"status": "ok"}` if the service and database are reachable.
+    Returns 200 with `{"status": "ok"}` if the service
+        and database are reachable.
     Returns 503 if the database is unavailable.
     """
     try:
         await session.execute(text(load_sql("health_check.sql")))
     except Exception as exc:
         logger.exception("Health check failed")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc)
+        )
     return HealthResponse(status="ok")
 
 
@@ -64,18 +70,25 @@ async def ingest(
     session: AsyncSession = Depends(get_session_dep),
 ) -> dict:
     """
-    Ingest telemetry payload.
+    POST: Ingest telemetry payload.
 
-    Creates or resolves building and device by name/external_id. Stores raw events
-    (with deduplication) and normalized measurements. Energy readings are canonicalized
-    to `energy_kwh_total` (Wh converted to kWh); unknown units are stored with `is_bad=1`.
+    Creates or resolves building and device by name/external_id.
+    Stores raw events (with deduplication) and normalized measurements.
+    Energy readings are canonicalized to `energy_kwh_total` (Wh to kWh);
+    Unknown units are stored with `is_bad=1`.
     Deltas are recomputed for energy after ingest.
 
     Returns 202 Accepted with `{"status": "accepted"}`.
     """
-    logger.info('POST: Obtaining building_id')
 
-    building_id = await DbResolver.get_or_create_building(session, payload.building.name)
+    """ 0. Obtaining basic information """
+
+    logger.info('POST: Obtaining basic information')
+
+    building_id = await DbResolver.get_or_create_building(
+        session,
+        payload.building.name
+    )
 
     device_id = await DbResolver.get_or_create_device(
         session,
@@ -84,14 +97,47 @@ async def ingest(
         name=payload.device.name,
     )
 
-    logger.info('POST: Obtaining device_id')
-
     for reading in payload.readings:
-        canonical_metric, canonical_unit, is_normal, is_bad = MetricNorm.canonical_metric_and_unit(
+
+        """ 1. Normalization and quality flags calculation """
+
+        logger.info('POST: Normalization and quality flags calculation')
+
+        canonical_metric, canonical_unit, is_normal, is_bad = (
+            MetricNorm.canonical_metric_and_unit(
+                reading.metric,
+                reading.unit,
+            )
+        )
+
+        canonical_value = MetricNorm.convert_value(
             reading.metric,
             reading.unit,
+            reading.value
         )
-        canonical_value = MetricNorm.convert_value(reading.metric, reading.unit, reading.value)
+
+        is_late = await IngestUtils.detect_latecomer(
+            session=session,
+            device_id=device_id,
+            canonical_metric=canonical_metric,
+            raw_timestamp=reading.timestamp
+        )
+
+        delta = await IngestUtils.calculate_delta_energy(
+            session=session,
+            device_id=device_id,
+            canonical_metric=canonical_metric,
+            canonical_value=canonical_value,
+            raw_timestamp=reading.timestamp
+        )
+
+        is_reset = 0 if delta == 0 else 1
+
+        raw_timestamp_str = reading.timestamp.isoformat()
+
+        """ 2. Deduplication """
+
+        logger.info('POST: Deduplication')
 
         dedupe_key = IngestUtils.compute_dedupe_key(
             payload.device.external_id,
@@ -100,20 +146,21 @@ async def ingest(
             reading.value,
             reading.dedupe_key,
         )
+        """ 3. Saving raw data """
 
-        logger.info('POST: Obtaining dedupe_key')
+        logger.info('POST: Saving raw data')
 
-        raw_payload_str = json.dumps(reading.raw_payload) if reading.raw_payload is not None else None
-        ts_str = reading.timestamp.isoformat()
-
-        logger.info('POST: Inserting raw data')
+        raw_payload_str = (
+            json.dumps(reading.raw_payload) if reading.raw_payload is not None
+            else None
+        )
 
         inserted_raw = (
             await session.execute(
                 text(load_sql("raw_events_insert_or_mark_duplicate.sql")),
                 {
                     "device_id": device_id,
-                    "source_ts": ts_str,
+                    "source_ts": raw_timestamp_str,
                     "metric": reading.metric,
                     "value": reading.value,
                     "unit": reading.unit,
@@ -123,80 +170,44 @@ async def ingest(
             )
         ).mappings().first()
 
-        raw_event_id = inserted_raw["id"]
         is_duplicate = 1 if inserted_raw.get("is_duplicate") else 0
 
-        logger.info('POST: Obtaining latest data')
+        """ 3. Saving processed data """
 
-        max_ts_row = (
-            await session.execute(
-                text(load_sql("measurements_max_ts.sql")),
-                {"device_id": device_id, "metric": canonical_metric, "ts": ts_str},
-            )
-        ).mappings().first()
+        logger.info('POST: Saving processed data')
 
-        max_ts = max_ts_row["max_ts"] if max_ts_row is not None else None
-        max_ts_parsed = datetime.fromisoformat(max_ts.replace("Z", "+00:00")) if max_ts else None
-        
-        is_late = 1 if max_ts_parsed and reading.timestamp < max_ts_parsed else 0
+        await session.execute(
+            text(load_sql("measurements_upsert_from_ingest.sql")),
+            {
+                "device_id": device_id,
+                "ts": raw_timestamp_str,
+                "metric": canonical_metric,
+                "value": canonical_value,
+                "unit": canonical_unit,
+                "raw_event_id": inserted_raw["id"],
+                "is_normal": is_normal,
+                "is_duplicate": is_duplicate,
+                "is_late": is_late,
+                "is_bad": is_bad,
+                "is_reset": is_reset,
+                "delta": delta
+            },
+        )
 
-        previous_row = (
-            await session.execute(
-                text(load_sql("measurements_latest_ts_for_metric.sql")),
-                {"device_id": device_id, "metric": canonical_metric, "ts": ts_str},
-            )
-        ).mappings().first()
+        """ 4. Late data processing """
 
-        latest_value = None if not previous_row else previous_row["value"]
-        delta = None
-        if previous_row:
-            if canonical_value - latest_value <= 0:
-                delta = 0.0
-            else:
-                delta = canonical_value - latest_value
-
-        # delta = 0.0 if canonical_value - latest_value <= 0 else canonical_value - latest_value
-        is_reset = 0 if delta == 0 else 1
-        
-
-        logger.info('POST: Inserting latest data')
-
-        inserted_measurements = (
-            await session.execute(
-                text(load_sql("measurements_upsert_from_ingest.sql")),
-                {
-                    "device_id": device_id,
-                    "ts": ts_str,
-                    "metric": canonical_metric,
-                    "value": canonical_value,
-                    "unit": canonical_unit,
-                    "raw_event_id": raw_event_id,
-                    "is_normal": 1 if is_normal else 0,
-                    "is_duplicate": is_duplicate,
-                    "is_late": is_late,
-                    "is_bad": 1 if is_bad else 0,
-                    "is_reset": is_reset,
-                    "delta": delta
-                },
-            )
-        ).mappings().first()
+        logger.info('POST: Late data processing')
 
         if is_late:
-            next_row = (
-                await session.execute(
-                    text(load_sql("measurement_next_by_ts.sql")),
-                    {"device_id": device_id, "metric": canonical_metric, "ts": inserted_measurements["ts"]},
-                )
-            ).mappings().first()
+            await IngestUtils.process_latecomer(
+                session=session,
+                device_id=device_id,
+                canonical_metric=canonical_metric,
+                canonical_value=canonical_value,
+                raw_timestamp=reading.timestamp,
+            )
 
-            if next_row is not None:
-                updated_delta = float(next_row["value"]) - canonical_value
-                updated_delta = updated_delta if updated_delta >= 0 else 0.0
-                updated_reset = 1 if updated_delta < 0 else 0
-                await session.execute(
-                    text(load_sql("measurement_update_delta.sql")),
-                    {"id": next_row["id"], "delta": updated_delta, "is_reset": updated_reset},
-                )
+        logger.info('POST: Done')
 
     return {"status": "accepted"}
 
@@ -217,9 +228,13 @@ async def list_buildings(
     """
     List all buildings.
 
-    Returns a list of `{id, name}`. Used by the UI to populate the Building filter.
+    Returns a list of `{id, name}`.
+    Used by the UI to populate the Building filter.
     """
-    rows = (await session.execute(text(load_sql("buildings_list.sql")))).mappings().all()
+    rows = (await session.execute(
+        text(load_sql("buildings_list.sql"))
+    )).mappings().all()
+
     return [Building(id=str(r["id"]), name=r["name"]) for r in rows]
 
 
@@ -240,6 +255,7 @@ async def list_devices(
             {"building_id": building_id},
         )
     ).mappings().all()
+
     return [
         Device(
             id=str(r["id"]),
@@ -270,40 +286,60 @@ async def all_devices(
             text(load_sql("measurements_all_devices_recent.sql")),
         )
     ).mappings().all()
+
     return [Mappers.row_to_measurement(r) for r in rows]
 
 
 @router.get("/devices/{device_id}/recent", response_model=List[Measurement])
 async def recent_measurements(
     device_id: str,
-    metric: str = Query(..., description="Canonical metric, e.g. energy_kwh_total"),
+    metric: str = Query(...),
     limit: int = Query(20, ge=1, le=100, description="Max number of rows"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
-    exclude_bad: str = Query("true", description="'true' to exclude is_bad=1 rows, 'false' to include"),
+    exclude_bad: str = Query("true"),
     session: AsyncSession = Depends(get_session_dep),
 ) -> List[Measurement]:
     """
     Recent measurements for a device and metric (paginated).
 
-    Returns one row per ingest event (original + duplicate), so the same ts can appear
-    twice when a reading was ingested twice. Time-ordered newest first.
-    When `exclude_bad=false`, includes legacy bad energy rows. Used by the Latest readings table.
+    Returns one row per ingest event (original + duplicate),
+    so the same ts can appear
+    twice when a reading was ingested twice.
+    Time-ordered newest first.
+    When `exclude_bad=false`, includes legacy bad energy rows.
+    Used by the `Latest readings` table.
     """
     exclude_bad_bool = Parsing.parse_exclude_bad(exclude_bad)
+
     bad_filter = " AND m.is_bad = 0" if exclude_bad_bool else ""
-    metric_condition = MetricNorm.build_metric_condition(metric, include_legacy_bad=not exclude_bad_bool)
-    metric_condition_expanded = metric_condition.replace("metric =", "m.metric =").replace("is_bad =", "m.is_bad =")
+
+    metric_condition = MetricNorm.build_metric_condition(
+        metric,
+        include_legacy_bad=not exclude_bad_bool
+    )
+
+    metric_condition_expanded = (metric_condition.replace(
+        "metric =", "m.metric =")
+    ).replace("is_bad =", "m.is_bad =")
+
     sql = (
         load_sql("measurements_recent_expanded.sql")
         .replace("{bad_filter}", bad_filter)
         .replace("{metric_condition}", metric_condition_expanded)
     )
+
     rows = (
         await session.execute(
             text(sql),
-            {"device_id": device_id, "metric": metric, "limit": limit, "offset": offset},
+            {
+                "device_id": device_id,
+                "metric": metric,
+                "limit": limit,
+                "offset": offset
+            },
         )
     ).mappings().all()
+
     return [Mappers.row_to_measurement(r) for r in rows]
 
 
@@ -316,9 +352,9 @@ async def recent_measurements(
 async def timeseries(
     device_id: str = Query(..., description="Device ID"),
     metric: str = Query("energy_kwh_total", description="Canonical metric"),
-    start: Optional[datetime] = Query(None, description="Inclusive start (ISO datetime)"),
-    end: Optional[datetime] = Query(None, description="Inclusive end (ISO datetime)"),
-    exclude_bad: str = Query("true", description="'true' to exclude is_bad=1 rows"),
+    start: Optional[datetime] = Query(None, description="ISO datetime"),
+    end: Optional[datetime] = Query(None, description="ISO datetime"),
+    exclude_bad: str = Query("true"),
     session: AsyncSession = Depends(get_session_dep),
 ) -> List[Measurement]:
     """
@@ -329,9 +365,16 @@ async def timeseries(
     time-series chart when a single device is selected.
     """
     exclude_bad_bool = Parsing.parse_exclude_bad(exclude_bad)
-    metric_cond = MetricNorm.build_metric_condition(metric, include_legacy_bad=not exclude_bad_bool)
+
+    metric_cond = MetricNorm.build_metric_condition(
+        metric,
+        include_legacy_bad=not exclude_bad_bool
+    )
+
     conditions = ["device_id = :device_id", metric_cond]
+
     params: dict = {"device_id": device_id, "metric": metric}
+
     if start is not None:
         conditions.append("ts >= :start")
         params["start"] = start.isoformat()
@@ -342,16 +385,21 @@ async def timeseries(
         conditions.append("is_bad = 0")
 
     where_clause = " AND ".join(conditions)
-    sql = load_sql("measurements_timeseries_base.sql").format(where_clause=where_clause)
+
+    sql = load_sql(
+        "measurements_timeseries_base.sql"
+    ).format(where_clause=where_clause)
+
     rows = (await session.execute(text(sql), params)).mappings().all()
+
     return [Mappers.row_to_measurement(r) for r in rows]
 
 
 @router.get("/timeseries/aggregated", response_model=List[dict])
 async def timeseries_aggregated(
-    building_id: str = Query(..., description="Building ID or 'all' for all buildings"),
+    building_id: str = Query(...),
     metric: str = Query("energy_kwh_total"),
-    device_id: str = Query("all", description="Device ID or 'all' for all devices in building"),
+    device_id: str = Query("all"),
     start: Optional[datetime] = Query(None),
     end: Optional[datetime] = Query(None),
     exclude_bad: str = Query("true"),
@@ -365,22 +413,46 @@ async def timeseries_aggregated(
     bad points for display overlay when Building=All.
 
     - `building_id=all`: one series per building (label = building name).
-    - `building_id=X`, `device_id=all`: one series for that building (label = Total).
+    - `building_id=X`, `device_id=all`: one series for that building
+        (label = Total).
     """
     filter_clause, params = FilterBuilder.build_aggregated_filter(
         True, start, end, "m", metric=metric, include_legacy_bad_energy=False
     )
 
     if building_id == "all":
-        sql = load_sql("timeseries_aggregated_all_buildings.sql").format(filter_clause=filter_clause)
+        sql = load_sql(
+            "timeseries_aggregated_all_buildings.sql"
+        ).format(filter_clause=filter_clause)
+
         rows = (await session.execute(text(sql), params)).mappings().all()
-        return [{"ts": r["ts"], "value": float(r["value"]), "delta": float(r["delta"] or 0), "label": r["label"]} for r in rows]
+
+        return [
+            {
+                "ts": r["ts"],
+                "value": float(r["value"]),
+                "delta": float(r["delta"] or 0),
+                "label": r["label"]
+            } for r in rows
+        ]
 
     if device_id == "all":
         params["building_id"] = building_id
-        sql = load_sql("timeseries_aggregated_one_building.sql").format(filter_clause=filter_clause)
+
+        sql = load_sql(
+            "timeseries_aggregated_one_building.sql"
+        ).format(filter_clause=filter_clause)
+
         rows = (await session.execute(text(sql), params)).mappings().all()
-        return [{"ts": r["ts"], "value": float(r["value"]), "delta": float(r["delta"] or 0), "label": "Total"} for r in rows]
+
+        return [
+            {
+                "ts": r["ts"],
+                "value": float(r["value"]),
+                "delta": float(r["delta"] or 0),
+                "label": "Total"
+            } for r in rows
+        ]
 
     return []
 
@@ -397,16 +469,25 @@ async def timeseries_aggregated_bad_points(
     Bad records only (is_bad=1) for overlay on the aggregated chart.
 
     Does not affect sums or calculations. Returns one row per (ts, building).
-    Used when Building=All and the user chooses to show bad records (gray dots).
+    Used when Building=All and the user chooses to show bad records (gray dots)
     """
     if building_id != "all":
         return []
     time_filter, params = FilterBuilder.build_time_filter(start, end, "m")
     params["metric"] = metric
-    sql = load_sql("timeseries_aggregated_bad_points.sql").replace("{time_filter}", time_filter)
+    sql = load_sql(
+        "timeseries_aggregated_bad_points.sql"
+    ).replace("{time_filter}", time_filter)
+
     rows = (await session.execute(text(sql), params)).mappings().all()
+
     return [
-        {"ts": r["ts"], "label": r["label"], "value": float(r["value"]), "delta": float(r["delta"] or 0)}
+        {
+            "ts": r["ts"],
+            "label": r["label"],
+            "value": float(r["value"]),
+            "delta": float(r["delta"] or 0)
+        }
         for r in rows
     ]
 
@@ -429,26 +510,55 @@ async def timeseries_sum_deltas(
     """
     if building_id == "all":
         filter_clause, params = FilterBuilder.build_aggregated_filter(
-            True, start, end, "m", metric=metric, include_legacy_bad_energy=False
+            True,
+            start,
+            end,
+            "m",
+            metric=metric,
+            include_legacy_bad_energy=False
         )
-        sql = load_sql("timeseries_sum_deltas_all_buildings.sql").format(filter_clause=filter_clause)
+
+        sql = load_sql(
+            "timeseries_sum_deltas_all_buildings.sql"
+        ).format(filter_clause=filter_clause)
+
         row = (await session.execute(text(sql), params)).mappings().first()
     elif device_id == "all":
         filter_clause, params = FilterBuilder.build_aggregated_filter(
-            True, start, end, "m", metric=metric, include_legacy_bad_energy=False
+            exclude_bad=True,
+            start=start,
+            end=end,
+            table_alias="m",
+            metric=metric,
+            include_legacy_bad_energy=False
         )
+
         params["building_id"] = building_id
-        sql = load_sql("timeseries_sum_deltas_one_building.sql").format(filter_clause=filter_clause)
+
+        sql = load_sql(
+            "timeseries_sum_deltas_one_building.sql"
+        ).format(filter_clause=filter_clause)
+
         row = (await session.execute(text(sql), params)).mappings().first()
     else:
-        filter_clause, params = FilterBuilder.build_aggregated_filter(True, start, end, "")
+        filter_clause, params = FilterBuilder.build_aggregated_filter(
+            exclude_bad=True,
+            start=start,
+            end=end,
+            table_alias="",
+        )
+
         params["device_id"] = device_id
+
         params["metric"] = metric
+
         metric_condition = "metric = :metric"
+
         sql = (
             load_sql("timeseries_sum_deltas_one_device.sql")
             .replace("{metric_condition}", metric_condition)
             .format(filter_clause=filter_clause)
         )
+
         row = (await session.execute(text(sql), params)).mappings().first()
     return {"sum_delta": float(row["sum_delta"] or 0)}

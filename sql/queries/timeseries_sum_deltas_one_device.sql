@@ -3,4 +3,5 @@ SELECT
 FROM 
     measurements
 WHERE 
-    device_id = :device_id AND {metric_condition} {filter_clause}
+    device_id = :device_id 
+    AND {metric_condition} {filter_clause}

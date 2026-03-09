@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 
 class JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
+    def format(self, record: logging.LogRecord) -> str:
         log: Dict[str, Any] = {
             "level": record.levelname,
             "logger": record.name,

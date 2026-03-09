@@ -7,4 +7,5 @@ JOIN
     ON 
         d.id = m.device_id
 WHERE 
-    1=1 {filter_clause}
+    1=1 
+    {filter_clause}
