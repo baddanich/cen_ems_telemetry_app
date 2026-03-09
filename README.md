@@ -3,14 +3,8 @@
 This project implements a small telemetry ingestion and normalization service for an energy management platform, plus a lightweight React UI.
 
 ### Architecture
-
 - **Backend**: FastAPI (Python) with SQLAlchemy async, backed by SQLite.
-- **Database**:
-  - `raw_events`: as-ingested telemetry (no normalization). On duplicate `dedupe_key`, a new row is inserted with `is_duplicate=1` (no UNIQUE on `dedupe_key`); the measurement is written/updated with `is_duplicate=1`.
-  - `measurements`: normalized canonical measurements with derived `delta` and quality flags (`is_normal`, `is_reset`, `is_duplicate`, `is_late`, `is_bad`).
-  - SQL schema and logic live in `sql/schema.sql`, and `sql/queries/*.sql`. If you have an existing DB created before `raw_events.is_duplicate` was added, run: `ALTER TABLE raw_events ADD COLUMN is_duplicate INTEGER NOT NULL DEFAULT 0;`
-- **Frontend**: Vite + React UI with Building/Device filters, **Energy** metric only, time range, time-series chart (with zoom), bad records toggle, latest readings table, and aggregated views (All buildings).
-- **Code layout**: `backend/app/api.py` — route handlers and ingest flow; `backend/app/utils.py` — helpers grouped by class: SQL in `sql/queries/*.sql`.
+- **Frontend**: Vite + React UI.
 
 ### Requirements and justifications
 
