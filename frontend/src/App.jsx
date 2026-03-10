@@ -169,7 +169,7 @@ function App() {
   const [timeseries, setTimeseries] = useState([]);
   const [aggregatedData, setAggregatedData] = useState([]);
   const [sumDeltas, setSumDeltas] = useState(null);
-  const [rollingWindowMinutes, setRollingWindowMinutes] = useState(60);
+  const [rollingWindowMinutes, setRollingWindowMinutes] = useState(30);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [badRecordsOption, setBadRecordsOption] = useState("hide");
@@ -341,7 +341,7 @@ function App() {
     const applyRolling = (rows, mode, windowMin) => {
       if (!rows?.length) return [];
       if (mode !== "rolling_avg" && mode !== "rolling_sum") return rows;
-      const windowMs = Math.max(1, Number(windowMin || 60)) * 60 * 1000;
+      const windowMs = Math.max(1, Number(windowMin || 30)) * 60 * 1000;
       // rows assumed sorted by ts asc
       const q = [];
       let sum = 0;
@@ -373,7 +373,9 @@ function App() {
     if (aggregatedData.length > 0) {
       // For multi-series (building aggregated OR device=all overlay), always chart `value`.
       // For delta mode, we pivot off `delta` into `value` first; for rolling modes we compute rolling into `value`.
-      const isDeltaMode = metricMode === "delta";
+      // When Building=All, Mode is frozen but Rolling window is editable — use rolling_avg so the window affects the chart.
+      const effectiveMode = selectedBuildingId === "all" ? "rolling_avg" : metricMode;
+      const isDeltaMode = selectedBuildingId !== "all" && metricMode === "delta";
       const byTs = {};
       const allLabels = new Set();
       // compute per-label rolling first (if needed)
@@ -387,7 +389,7 @@ function App() {
       const normalized = [];
       Object.entries(byLabel).forEach(([label, rows]) => {
         const sorted = rows.slice().sort((a, b) => new Date(a.ts) - new Date(b.ts));
-        const rolled = applyRolling(sorted, metricMode, rollingWindowMinutes);
+        const rolled = applyRolling(sorted, effectiveMode, rollingWindowMinutes);
         rolled.forEach((r) => {
           normalized.push({
             ...r,
@@ -447,7 +449,7 @@ function App() {
         is_bad: p.is_bad
       };
     });
-  }, [timeseries, aggregatedData, aggregatedBadPoints, metricMode, showBadRecords, rollingWindowMinutes]);
+  }, [timeseries, aggregatedData, aggregatedBadPoints, metricMode, showBadRecords, rollingWindowMinutes, selectedBuildingId]);
 
   const CHART_COLORS = ["#2563eb", "#16a34a", "#dc2626", "#9333ea", "#ea580c", "#0891b2", "#4f46e5", "#059669"];
   const AGGREGATED_SERIES_KEYS = ["ts", "tsLabel", "mainValue", "badValue", "lateValue", "is_late", "is_bad"];
@@ -628,7 +630,7 @@ function App() {
               min={1}
               max={1440}
               value={rollingWindowMinutes}
-              disabled={!rollingEnabled}
+              disabled={selectedBuildingId !== "all" && !rollingEnabled}
               onChange={(e) => setRollingWindowMinutes(Number(e.target.value))}
               style={{ padding: "4px 8px", borderRadius: 4, border: "1px solid #ccc", width: 120 }}
             />
