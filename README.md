@@ -46,6 +46,7 @@ Each requirement is listed with a short justification for why it exists.
 | R7 | **Recent & time series** — `GET /devices/{id}/recent` (paginated, newest first) and `GET /timeseries` (ascending, optional start/end). Query `exclude_bad` to include or hide bad records. | Supports "latest readings" table and time-series chart; same API serves both good-only and "show bad" views. |
 | R8 | **Bad records toggle** — User can show or hide bad points; Building=All uses aggregated bad points overlay (no "Bad: building" in legend). | Visibility of bad data when needed without cluttering the legend or affecting totals. |
 | R10 | **Charts** — Plot individual graph based on `Mode` or general graph for all existing devices. | Interactive legend with id, timestamp, late events. Late points are highlighted. |
+<img width="1235" height="902" alt="Screenshot 2026-03-10 at 14 34 18" src="https://github.com/user-attachments/assets/50629939-cce4-4c6d-aac3-c3ff81a573ea" />
 
 
 ### Running with Docker (recommended)
