@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS measurements (
     raw_event_id  INTEGER REFERENCES raw_events(id) ON DELETE SET NULL,
     delta         REAL,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT,
     UNIQUE (device_id, metric, ts)
 );
 

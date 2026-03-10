@@ -430,6 +430,56 @@ async def test_timeseries_aggregated(db_pool: AsyncSession, ensure_db_connected)
 
 
 @pytest.mark.asyncio
+async def test_timeseries_by_building_returns_all_devices(db_pool: AsyncSession, ensure_db_connected) -> None:
+    """GET /timeseries/by_building returns rows for all devices in a building with label per device."""
+    app = create_app()
+    transport = ASGITransport(app=app)
+    base_ts = datetime(2024, 6, 21, 10, 0, 0, tzinfo=timezone.utc)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Device 1
+        await client.post(
+            "/ingest",
+            json={
+                "building": {"name": "ByBuilding"},
+                "device": {"external_id": "d-1", "name": "D1"},
+                "readings": [
+                    {"timestamp": (base_ts + timedelta(minutes=0)).isoformat(), "metric": "energy", "value": 0.0, "unit": "kWh"},
+                    {"timestamp": (base_ts + timedelta(minutes=30)).isoformat(), "metric": "energy", "value": 5.0, "unit": "kWh"},
+                ],
+            },
+        )
+        # Device 2
+        await client.post(
+            "/ingest",
+            json={
+                "building": {"name": "ByBuilding"},
+                "device": {"external_id": "d-2", "name": "D2"},
+                "readings": [
+                    {"timestamp": (base_ts + timedelta(minutes=0)).isoformat(), "metric": "energy", "value": 1.0, "unit": "kWh"},
+                    {"timestamp": (base_ts + timedelta(minutes=30)).isoformat(), "metric": "energy", "value": 3.0, "unit": "kWh"},
+                ],
+            },
+        )
+
+        buildings = (await client.get("/buildings")).json()
+        bid = next((b["id"] for b in buildings if b.get("name") == "ByBuilding"), buildings[0]["id"])
+
+        r = await client.get(
+            "/timeseries/by_building",
+            params={"building_id": bid, "metric": "energy_kwh_total", "exclude_bad": "true"},
+        )
+        assert r.status_code == 200
+        rows = r.json()
+        assert isinstance(rows, list)
+        assert rows, "Expected non-empty timeseries"
+        labels = {row.get("label") for row in rows}
+        assert "d-1" in labels
+        assert "d-2" in labels
+        for row in rows:
+            assert "ts" in row and "label" in row and "value" in row and "delta" in row
+
+
+@pytest.mark.asyncio
 async def test_timeseries_aggregated_bad_points(db_pool: AsyncSession, ensure_db_connected) -> None:
     """GET /timeseries/aggregated_bad_points: only building_id=all returns data; other building_id returns []."""
     app = create_app()

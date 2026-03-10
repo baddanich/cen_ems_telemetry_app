@@ -284,7 +284,7 @@ async def all_devices(
     """
     rows = (
         await session.execute(
-            text(load_sql("measurements_all_devices_recent.sql")),
+            text(load_sql("measurements_all_devices.sql")),
         )
     ).mappings().all()
 
@@ -394,6 +394,62 @@ async def timeseries(
     rows = (await session.execute(text(sql), params)).mappings().all()
 
     return [Mappers.row_to_measurement(r) for r in rows]
+
+
+@router.get("/timeseries/by_building", response_model=List[dict])
+async def timeseries_by_building(
+    building_id: str = Query(..., description="Building ID"),
+    metric: str = Query("energy_kwh_total", description="Canonical metric"),
+    start: Optional[datetime] = Query(None, description="ISO datetime"),
+    end: Optional[datetime] = Query(None, description="ISO datetime"),
+    exclude_bad: str = Query("true"),
+    session: AsyncSession = Depends(get_session_dep),
+) -> List[dict]:
+    """
+    Time-ordered measurements for all devices in a building.
+
+    Returns rows in ascending ts order per device. Used by the UI when
+    Device=All (overlay all sensors on one chart).
+    """
+    exclude_bad_bool = Parsing.parse_exclude_bad(exclude_bad)
+
+    metric_cond = MetricNorm.build_metric_condition(
+        metric,
+        include_legacy_bad=not exclude_bad_bool
+    )
+    metric_cond = (metric_cond.replace("metric =", "m.metric =")
+                   .replace("is_bad =", "m.is_bad ="))
+
+    conditions = ["d.building_id = :building_id", metric_cond]
+    params: dict = {"building_id": building_id, "metric": metric}
+
+    if start is not None:
+        conditions.append("m.ts >= :start")
+        params["start"] = start.isoformat()
+    if end is not None:
+        conditions.append("m.ts <= :end")
+        params["end"] = end.isoformat()
+    if exclude_bad_bool:
+        conditions.append("m.is_bad = 0")
+
+    where_clause = " AND ".join(conditions)
+    sql = load_sql("measurements_timeseries_by_building.sql").format(where_clause=where_clause)
+    rows = (await session.execute(text(sql), params)).mappings().all()
+
+    return [
+        {
+            "ts": str(r["ts"]),
+            "label": r["label"],
+            "value": float(r["value"]),
+            "delta": float(r["delta"]) if r.get("delta") is not None else None,
+            "is_normal": bool(r.get("is_normal", 0)),
+            "is_reset": bool(r.get("is_reset", 0)),
+            "is_duplicate": bool(r.get("is_duplicate", 0)),
+            "is_late": bool(r.get("is_late", 0)),
+            "is_bad": bool(r.get("is_bad", 0)),
+        }
+        for r in rows
+    ]
 
 
 @router.get("/timeseries/aggregated", response_model=List[dict])

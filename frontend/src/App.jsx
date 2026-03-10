@@ -41,6 +41,18 @@ const api = {
   },
   async getTimeseries(deviceId, metric, start, end, buildingId, includeBad = false) {
     const excludeBad = !includeBad;
+    if (deviceId === "all" && buildingId && buildingId !== "all") {
+      const params = new URLSearchParams({
+        building_id: buildingId,
+        metric: metric || "energy_kwh_total",
+        exclude_bad: excludeBad ? "true" : "false"
+      });
+      if (start) params.append("start", start.toISOString());
+      if (end) params.append("end", end.toISOString());
+      const res = await fetch(`/timeseries/by_building?${params.toString()}`);
+      if (!res.ok) throw new Error("Failed to fetch building timeseries");
+      return res.json();
+    }
     if (buildingId === "all" || deviceId === "all") {
       const params = new URLSearchParams({
         building_id: buildingId || "all",
@@ -88,12 +100,6 @@ function formatQualityFlags(m) {
   if (m.is_bad) parts.push("Bad");
   return parts.length ? parts.join(", ") : "";
 }
-
-const PREFIXES = [
-  { value: 1, label: "kWh" },
-  { value: 1e3, label: "MWh" },
-  { value: 1e6, label: "GWh" }
-];
 
 const RECORDS_PER_PAGE = 5;
 
@@ -163,7 +169,7 @@ function App() {
   const [timeseries, setTimeseries] = useState([]);
   const [aggregatedData, setAggregatedData] = useState([]);
   const [sumDeltas, setSumDeltas] = useState(null);
-  const [valuePrefix, setValuePrefix] = useState(1);
+  const [rollingWindowMinutes, setRollingWindowMinutes] = useState(60);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [badRecordsOption, setBadRecordsOption] = useState("hide");
@@ -229,6 +235,18 @@ function App() {
 
   const apiMetric = selectedMetric || "energy_kwh_total";
 
+  const modeOptions = useMemo(
+    () => [
+      { value: "raw", label: "raw" },
+      { value: "delta", label: "delta" },
+      { value: "rolling_avg", label: "rolling avg" },
+      { value: "rolling_sum", label: "rolling sum" },
+    ],
+    []
+  );
+
+  const rollingEnabled = metricMode === "rolling_avg" || metricMode === "rolling_sum";
+
   const metricOptions = useMemo(
     () => [{ value: "energy_kwh_total", label: "Energy" }],
     []
@@ -280,7 +298,7 @@ function App() {
     } else if (useAggregated) {
       setLoading(true);
       api
-        .getTimeseries("all", apiMetric, start, end, selectedBuildingId || "all", false)
+        .getTimeseries("all", apiMetric, start, end, selectedBuildingId || "all", showBadRecords)
         .then((data) => {
           setAggregatedData(Array.isArray(data) ? data : []);
           setTimeseries([]);
@@ -320,16 +338,71 @@ function App() {
   const canGoPrev = recentPage < totalRecentPages - 1;
 
   const chartData = useMemo(() => {
+    const applyRolling = (rows, mode, windowMin) => {
+      if (!rows?.length) return [];
+      if (mode !== "rolling_avg" && mode !== "rolling_sum") return rows;
+      const windowMs = Math.max(1, Number(windowMin || 60)) * 60 * 1000;
+      // rows assumed sorted by ts asc
+      const q = [];
+      let sum = 0;
+      let count = 0;
+      return rows.map((r) => {
+        const t = new Date(r.ts).getTime();
+        const base =
+          mode === "rolling_avg"
+            ? (r.value ?? null)
+            : (r.delta ?? 0); // rolling_sum over deltas, treat null as 0
+        q.push({ t, v: base ?? 0, isNull: base == null });
+        if (base != null) {
+          sum += base;
+          count += 1;
+        }
+        while (q.length && t - q[0].t > windowMs) {
+          const out = q.shift();
+          if (out && !out.isNull) {
+            sum -= out.v;
+            count -= 1;
+          }
+        }
+        const rolled =
+          mode === "rolling_avg" ? (count ? sum / count : null) : sum;
+        return { ...r, value: rolled };
+      });
+    };
+
     if (aggregatedData.length > 0) {
-      const key = metricMode === "delta" ? "delta" : "value";
+      // For multi-series (building aggregated OR device=all overlay), always chart `value`.
+      // For delta mode, we pivot off `delta` into `value` first; for rolling modes we compute rolling into `value`.
+      const isDeltaMode = metricMode === "delta";
       const byTs = {};
       const allLabels = new Set();
+      // compute per-label rolling first (if needed)
+      const byLabel = {};
       aggregatedData.forEach((r) => {
+        if (!showBadRecords && r.is_bad) return;
+        const label = r.label || "Total";
+        if (!byLabel[label]) byLabel[label] = [];
+        byLabel[label].push(r);
+      });
+      const normalized = [];
+      Object.entries(byLabel).forEach(([label, rows]) => {
+        const sorted = rows.slice().sort((a, b) => new Date(a.ts) - new Date(b.ts));
+        const rolled = applyRolling(sorted, metricMode, rollingWindowMinutes);
+        rolled.forEach((r) => {
+          normalized.push({
+            ...r,
+            label,
+            value: (isDeltaMode ? (r.delta ?? null) : (r.value ?? null)),
+          });
+        });
+      });
+
+      normalized.forEach((r) => {
         const ts = r.ts;
         const label = r.label || "Total";
         allLabels.add(label);
         if (!byTs[ts]) byTs[ts] = { tsLabel: formatTsUtc(ts), ts };
-        byTs[ts][label] = (r[key] ?? 0) / valuePrefix;
+        byTs[ts][label] = (r.value ?? null);
       });
       const sortedLabels = [...allLabels].sort();
       const sortedTs = Object.keys(byTs).sort((a, b) => new Date(a) - new Date(b));
@@ -338,7 +411,7 @@ function App() {
         const ts = p.ts;
         const label = p.label || "Total";
         if (!badByTs[ts]) badByTs[ts] = {};
-        badByTs[ts][label] = (p[key] ?? 0) / valuePrefix;
+        badByTs[ts][label] = isDeltaMode ? (p.delta ?? 0) : (p.value ?? 0);
       });
       return sortedTs.map((ts) => {
         const row = { tsLabel: byTs[ts].tsLabel, ts: byTs[ts].ts };
@@ -352,23 +425,29 @@ function App() {
       });
     }
     const key = metricMode === "delta" ? "delta" : "value";
-    return timeseries
+    const base = timeseries
       .filter((p) => showBadRecords || !p.is_bad)
-      .map((p) => {
-        const val = (metricMode === "delta" ? (p.delta ?? 0) : (p.value || 0)) / valuePrefix;
-        return {
-          ...p,
-          tsLabel: formatTsUtc(p.ts),
-          value: (p.value || 0) / valuePrefix,
-          delta: (p.delta ?? 0) / valuePrefix,
-          mainValue: p.is_bad ? null : val,
-          badValue: p.is_bad ? val : null,
-          lateValue: p.is_late ? val : null,
-          is_late: p.is_late,
-          is_bad: p.is_bad
-        };
-      });
-  }, [timeseries, aggregatedData, aggregatedBadPoints, valuePrefix, metricMode, showBadRecords]);
+      .map((p) => ({
+        ...p,
+        tsLabel: formatTsUtc(p.ts),
+      }))
+      .sort((a, b) => new Date(a.ts) - new Date(b.ts));
+
+    const rolled = applyRolling(base, metricMode, rollingWindowMinutes);
+    return rolled.map((p) => {
+      const val = metricMode === "delta" ? (p.delta ?? null) : (p.value ?? null);
+      return {
+        ...p,
+        value: p.value ?? null,
+        delta: p.delta ?? null,
+        mainValue: p.is_bad ? null : val,
+        badValue: p.is_bad ? val : null,
+        lateValue: p.is_late ? val : null,
+        is_late: p.is_late,
+        is_bad: p.is_bad
+      };
+    });
+  }, [timeseries, aggregatedData, aggregatedBadPoints, metricMode, showBadRecords, rollingWindowMinutes]);
 
   const CHART_COLORS = ["#2563eb", "#16a34a", "#dc2626", "#9333ea", "#ea580c", "#0891b2", "#4f46e5", "#059669"];
   const AGGREGATED_SERIES_KEYS = ["ts", "tsLabel", "mainValue", "badValue", "lateValue", "is_late", "is_bad"];
@@ -392,14 +471,14 @@ function App() {
         ts: r.ts,
         tsLabel: formatTsUtc(r.ts),
         building: label,
-        [key]: (r[key] ?? 0) / valuePrefix
+        [key]: (r[key] ?? 0)
       });
     });
     return Object.entries(byBuilding).map(([name, data]) => ({
       buildingName: name,
       data: data.sort((a, b) => new Date(a.ts) - new Date(b.ts))
     }));
-  }, [selectedBuildingId, aggregatedData, metricMode, valuePrefix]);
+  }, [selectedBuildingId, aggregatedData, metricMode]);
 
   useEffect(() => {
     setChartZoomStart(0);
@@ -433,9 +512,11 @@ function App() {
 
   const chartDataKey = metricMode === "delta" ? "delta" : "value";
   const yAxisLabel = useMemo(() => {
-    const unit = PREFIXES.find((p) => p.value === valuePrefix)?.label || "kWh";
-    return metricMode === "delta" ? `Delta (${unit})` : `Value (${unit})`;
-  }, [valuePrefix, metricMode]);
+    if (metricMode === "delta") return "Delta (kWh)";
+    if (metricMode === "rolling_avg") return "Rolling avg (kWh)";
+    if (metricMode === "rolling_sum") return "Rolling sum (kWh)";
+    return "Value (kWh)";
+  }, [metricMode]);
 
   return (
     <div
@@ -448,7 +529,10 @@ function App() {
     >
       <h2 style={{ marginBottom: "0.5rem" }}>CenEMS Telemetry Viewer</h2>
       <p style={{ marginBottom: "1rem", fontSize: "0.9rem", color: "#555", maxWidth: "720px" }}>
-        Select <strong>Building{'/'}Device</strong> {'->'} <strong>All</strong> to show average energy distribution aggregated over a 1‑hour window.
+        <br />Select <strong>Building{'/'}Device</strong> {'->'} <strong>All</strong> to show average energy distribution across all buildings and devices.
+        <br />Select <strong>Mode</strong> {'->'} <strong>raw</strong> to show the raw time series.
+        <br />Select <strong>Mode</strong> {'->'} <strong>delta</strong> to show the first derivative.
+        <br />Select <strong>Mode</strong> {'->'} <strong>rolling avg/sum</strong> to show aggregated results over an adjustable time window.
       </p>
 
       {error && (
@@ -525,10 +609,29 @@ function App() {
           <label>
             <strong>Mode</strong>
             <br />
-            <select value={metricMode} onChange={(e) => setMetricMode(e.target.value)}>
-              <option value="raw">raw</option>
-              <option value="delta">delta</option>
+            <select value={metricMode} onChange={(e) => setMetricMode(e.target.value)} disabled={selectedBuildingId === "all"}>
+              {modeOptions.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
+                </option>
+              ))}
             </select>
+          </label>
+        </div>
+
+        <div>
+          <label>
+            <strong>Rolling window (minutes)</strong>
+            <br />
+            <input
+              type="number"
+              min={1}
+              max={1440}
+              value={rollingWindowMinutes}
+              disabled={!rollingEnabled}
+              onChange={(e) => setRollingWindowMinutes(Number(e.target.value))}
+              style={{ padding: "4px 8px", borderRadius: 4, border: "1px solid #ccc", width: 120 }}
+            />
           </label>
         </div>
 
@@ -587,28 +690,11 @@ function App() {
 
         <div>
           <label>
-            <strong>Scale</strong>
-            <br />
-            <select
-              value={valuePrefix}
-              onChange={(e) => setValuePrefix(Number(e.target.value))}
-            >
-              {PREFIXES.map((p) => (
-                <option key={p.value} value={p.value}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-
-        <div>
-          <label>
             <strong>Total</strong>
             <br />
             <span style={{ padding: "4px 8px", display: "inline-block", minWidth: 120 }}>
               {sumDeltas != null
-                ? `${(sumDeltas / valuePrefix).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${PREFIXES.find((p) => p.value === valuePrefix)?.label || "kWh"}`
+                ? `${sumDeltas.toLocaleString(undefined, { maximumFractionDigits: 2 })} kWh`
                 : "—"}
             </span>
           </label>
@@ -744,7 +830,15 @@ function App() {
                       stroke="#2563eb"
                       dot={false}
                       connectNulls
-                      name={metricMode === "delta" ? "Delta" : "Value"}
+                      name={
+                        metricMode === "delta"
+                          ? "Delta"
+                          : metricMode === "rolling_avg"
+                            ? "Rolling avg"
+                            : metricMode === "rolling_sum"
+                              ? "Rolling sum"
+                              : "Value"
+                      }
                     />
                     {showBadRecords && chartData.some((d) => d.badValue != null) && (
                       <Line
@@ -807,12 +901,14 @@ function App() {
               >
                 <thead style={{ position: "sticky", top: 0, background: "#f5f5f5" }}>
                   <tr>
-                    <th align="left" style={{ width: "12%" }}>id</th>
-                    <th align="left" style={{ width: "22%" }}>Timestamp</th>
-                    <th align="right" style={{ width: "12%" }}>Value</th>
-                    <th align="left" style={{ width: "8%" }}>Unit</th>
-                    <th align="right" style={{ width: "12%", paddingRight: "1rem" }}>Delta</th>
-                    <th align="left" style={{ width: "34%", paddingLeft: "1rem" }}>Quality Flags</th>
+                    <th align="left" style={{ width: "8%" }}>id</th>
+                    <th align="left" style={{ width: "18%" }}>Timestamp</th>
+                    <th align="left" style={{ width: "16%" }}>created_at</th>
+                    <th align="left" style={{ width: "16%" }}>updated_at</th>
+                    <th align="right" style={{ width: "10%" }}>Value</th>
+                    <th align="left" style={{ width: "6%" }}>Unit</th>
+                    <th align="right" style={{ width: "10%", paddingRight: "1rem" }}>Delta</th>
+                    <th align="left" style={{ width: "16%", paddingLeft: "1rem" }}>Quality Flags</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -820,6 +916,8 @@ function App() {
                     <tr key={m.raw_event_id != null ? m.raw_event_id : (m.id != null ? m.id : `${m.ts}-${m.metric}-${i}`)}>
                       <td>{m.id != null ? m.id : "—"}</td>
                       <td>{formatTsUtcFull(m.ts)}</td>
+                      <td>{m.created_at ? formatTsUtcFull(m.created_at) : "—"}</td>
+                      <td>{m.updated_at ? formatTsUtcFull(m.updated_at) : "—"}</td>
                       <td align="right">{m.value.toFixed(3)}</td>
                       <td>{m.unit}</td>
                       <td align="right" style={{ paddingRight: "1rem" }}>

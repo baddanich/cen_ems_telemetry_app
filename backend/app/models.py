@@ -29,6 +29,8 @@ class Measurement(BaseModel):
     is_late: bool = False
     is_bad: bool = False
     raw_event_id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
 
 class IngestReading(BaseModel):

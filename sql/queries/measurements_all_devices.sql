@@ -14,5 +14,3 @@ FROM
     measurements
 ORDER BY 
     ts DESC
-LIMIT 
-    200

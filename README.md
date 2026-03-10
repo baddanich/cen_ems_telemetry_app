@@ -19,6 +19,8 @@ The base requirements were delivered, and some small features were added: handli
 - **Backend**: FastAPI (Python) with SQLAlchemy async, backed by SQLite.
 - **Frontend**: Vite + React UI with Building/Device filters, **Energy** metric only, time range, time-series chart (with zoom), bad records toggle, latest readings table, and aggregated views (All buildings).
 
+**Migration:** If you have an existing DB created before `measurements.updated_at` was added, run: `ALTER TABLE measurements ADD COLUMN updated_at TEXT;`
+
 ### Requirements and justifications
 
 Each requirement is listed with a short justification for why it exists.

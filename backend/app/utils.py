@@ -355,6 +355,17 @@ class Mappers:
             ts_val = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
             if ts_val.tzinfo is None:
                 ts_val = ts_val.replace(tzinfo=timezone.utc)
+        def _parse_ts(key: str):
+            val = r.get(key)
+            if val is None:
+                return None
+            if isinstance(val, str):
+                parsed = datetime.fromisoformat(val.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed
+            return val
+
         return Measurement(
             id=int(r["id"]) if r.get("id") is not None else None,
             ts=ts_val,
@@ -370,5 +381,7 @@ class Mappers:
             raw_event_id=(
                 int(r["raw_event_id"]) if r.get("raw_event_id") is not None
                 else None
-            )
+            ),
+            created_at=_parse_ts("created_at"),
+            updated_at=_parse_ts("updated_at"),
         )
