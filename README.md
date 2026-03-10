@@ -17,7 +17,7 @@ The base requirements were delivered, with handling of bad records, late events,
 ### Architecture
 
 - **Backend**: FastAPI (Python) with SQLAlchemy async, backed by SQLite.
-- **Frontend**: Vite + React UI with Building/Device filters, **Energy** metric only, time range, time-series chart (with zoom), Mode (raw/delta), Scale (kWh/MWh/GWh), bad records toggle, latest readings table, and aggregated views (Building=All or Device=All).
+- **Frontend**: Vite + React UI
 
 ### Requirements and justifications
 
@@ -28,24 +28,24 @@ Each requirement is listed with a short justification for why it exists.
 | # | Requirement | Justification |
 |---|-------------|---------------|
 | R1 | **Ingestion & raw events** — `POST /ingest` stores every reading in `raw_events` and writes normalized rows to `measurements`. | Preserves audit trail; supports replay and debugging without losing original payloads. |
-| R2 | **Deduplication** — Deterministic `dedupe_key`; on conflict we still return the row and set `is_duplicate=1` (raw_events, measurement keeps flags). | Duplicate ingest is recorded with `is_duplicate=1` instead of dropped; idempotent and avoids double-counting in deltas/totals. |
+| R2 | **Deduplication** — Deterministic `dedupe_key`; on conflict we still return the keep the row (`raw_events` table) and set `is_duplicate=1` for `measurement` table. | Keeps the history and non-silent logic; idempotent and avoids double-counting in deltas/totals. |
 | R3 | **Canonical metric & unit** — Energy is normalized to `energy_kwh_total`; Wh is converted to kWh; unknown units (e.g. kals) set `is_bad=1` but are still stored. | One consistent series for queries and UI; bad data is visible or hideable instead of dropped. |
 | R4 | **Quality flags** — Each measurement has `is_normal`, `is_reset`, `is_duplicate`, `is_late`, `is_bad`. | Enables filtering and highlighting of suspect data; totals and charts can exclude bad data by default. |
-| R5 | **Out of order handling** — late events handling | The delta is computed using the simple relationship `delta = value[i] - value[i-1]`. The chosen strategy is to recalculate only `value[i+1]` when late updates occur, as this is the sole value affected by the delta dependency. |
-
+| R5 | **Out of order handling** — late events handling The delta is computed using the simple relationship `delta = value[i] - value[i-1]`. | The chosen strategy is to recalculate only `value[i+1]` when late updates occur, as this is the sole value affected by the delta dependency. |
+| R6 | **Health check** — `GET /health` returns 200 when DB is reachable, 503 otherwise. | Enables load balancers and orchestration to probe readiness. |
 ### UI 
 
 | # | Requirement | Justification |
 |---|-------------|---------------|
-| R1 | **Buildings & devices** — Buildings and devices are created on first use (by name / external_id). List endpoints: `GET /buildings`, `GET /buildings/{id}/devices`. | Simple hierarchy for filtering in the UI; no separate provisioning step. |
-| R2 | **Time range** — Optional start/end for timeseries, aggregated, and sum_deltas. | Lets users focus on a window; totals and charts stay consistent with the chosen range. |
-| R3 | **Recent & timeseries** — `GET /devices/{id}/recent` (paginated, newest first) and `GET /timeseries` (ascending, optional start/end). Query `exclude_bad` to include or hide bad records. | Supports "latest readings" table and time-series chart; same API serves both good-only and "show bad" views. |
-| R4 | **Aggregated views** — Building=All: one series per building; Building=X: one "Total" series. AVG(value) per time partition (parametrized `frequency_minutes`, default 60). Good data only; bad points fetched separately for overlay. Timestamps returned as ISO UTC (Z suffix) for consistent display with raw data. | Multi-building comparison and single-building total; time-aligned partitions avoid timezone drift; UTC timestamps ensure frontend parses correctly across timezones. |
-| R5 | **Total** — `GET /timeseries/sum_deltas` returns total consumption in the range (good data only). | Single "Total" figure for the selected period and scope. |
-| R6 | **Health check** — `GET /health` returns 200 when DB is reachable, 503 otherwise. | Enables load balancers and orchestration to probe readiness. |
-| R7 | **UI: Building/Device filters, Energy metric, time range** — Frontend allows selecting building (or All), device (pr All), and optional start/end. | Matches backend capabilities and keeps the UI aligned with the data model. |
-| R8 | **UI: Time-series** — Chart shows raw values, deltas, rolling avg and sum (Mode selector); zoom and Reset apply to the visible point range only. | Large datasets remain navigable; Mode lets users switch between cumulative and incremental view. |
-| R9 | **UI: Bad records toggle** — User can show or hide bad points; Building=All uses aggregated bad points overlay (no "Bad: building" in legend). | Visibility of bad data when needed without cluttering the legend or affecting totals. |
+| R1 | **Buildings & devices** — Buildings and devices are created on first use (by name/external_id). List endpoints: `GET /buildings`, `GET /buildings/{id}/devices`. | Simple hierarchy for filtering in the UI; no separate provisioning step. |
+| R2 | **Metric** — Only `Energy` is available at this point. | According to general requirements. |
+| R3 | **Time range filter** — Optional start/end for time series, aggregated, and sum_deltas. | Lets users focus on a window; totals and charts stay consistent with the chosen range. |
+| R4 | **Mode** — Chart shows raw values, deltas, rolling avg, and rolling sum (Mode selector). | Good data only; bad points can be shown on charts. |
+| R5 | **Rolling window** — Adjustable window width. | Available for rolling avg and rolling sum. |
+| R6 | **Total** — `GET /timeseries/sum_deltas` returns total consumption in the range (good data only). | Single "Total" figure for the selected period and scope. |
+| R7 | **Recent & time series** — `GET /devices/{id}/recent` (paginated, newest first) and `GET /timeseries` (ascending, optional start/end). Query `exclude_bad` to include or hide bad records. | Supports "latest readings" table and time-series chart; same API serves both good-only and "show bad" views. |
+| R8 | **Bad records toggle** — User can show or hide bad points; Building=All uses aggregated bad points overlay (no "Bad: building" in legend). | Visibility of bad data when needed without cluttering the legend or affecting totals. |
+| R10 | **Charts** — Plot individual graph based on `Mode` or general graph for all existing devices. | Interactive legend with id, timestamp, late events. Late points are highlighted. |
 
 
 ### Running with Docker (recommended)
