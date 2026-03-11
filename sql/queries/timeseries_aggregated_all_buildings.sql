@@ -3,12 +3,10 @@ WITH bucketed AS (
     SELECT
         m.value,
         m.delta,
-        d.building_id,
-        b.name AS label,
+        m.building_id,
+        m.building_name AS label,
         datetime((strftime('%s', m.ts) / :bucket_seconds) * :bucket_seconds, 'unixepoch') AS partition_ts
     FROM measurements m
-    JOIN devices d ON d.id = m.device_id
-    JOIN buildings b ON b.id = d.building_id
     WHERE 1=1 {filter_clause}
 )
 SELECT

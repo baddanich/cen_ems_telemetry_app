@@ -35,7 +35,7 @@ async def _apply_migrations(session: AsyncSession) -> None:
     schema_path = root / "sql" / "schema.sql"
 
     # Drop tables so CREATE TABLE IF NOT EXISTS uses latest schema
-    for table in ("measurements", "raw_events", "devices", "buildings"):
+    for table in ("measurements", "raw_events"):
         await session.execute(text(f"DROP TABLE IF EXISTS {table}"))
     await session.commit()
 
@@ -89,7 +89,5 @@ async def ensure_db_connected():
 async def clean_db(db_session: AsyncSession) -> AsyncIterator[None]:
     await db_session.execute(text("DELETE FROM measurements"))
     await db_session.execute(text("DELETE FROM raw_events"))
-    await db_session.execute(text("DELETE FROM devices"))
-    await db_session.execute(text("DELETE FROM buildings"))
     await db_session.commit()
     yield

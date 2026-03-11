@@ -218,6 +218,27 @@ class IngestUtils:
         return
 
 # ---------------------------------------------------------------------------
+# Stable IDs: deterministic building/device IDs without tables
+# ---------------------------------------------------------------------------
+class StableIds:
+    """
+    Generate deterministic IDs so the API can keep using building_id/device_id
+    even though buildings/devices tables are removed.
+    """
+
+    _NS = uuid.UUID("2f5d9c5d-6b32-4b6d-97aa-5f7c516f9833")
+
+    @staticmethod
+    def building_id(building_name: str) -> str:
+        name = (building_name or "").strip()
+        return str(uuid.uuid5(StableIds._NS, f"building:{name.lower()}"))
+
+    @staticmethod
+    def device_id(device_external_id: str) -> str:
+        ext = (device_external_id or "").strip()
+        return str(uuid.uuid5(StableIds._NS, f"device:{ext.lower()}"))
+
+# ---------------------------------------------------------------------------
 # DB resolution: get-or-create building/device
 # ---------------------------------------------------------------------------
 
@@ -311,6 +332,8 @@ class FilterBuilder:
             params["metric"] = metric
         if exclude_bad:
             filter_parts.append(f"AND {prefix}is_bad = 0")
+        # Never use duplicate measurements in aggregates/sums
+        filter_parts.append(f"AND {prefix}is_duplicate = 0")
         if start is not None:
             filter_parts.append(f"AND {prefix}ts >= :start")
             params["start"] = start.isoformat()
@@ -368,6 +391,11 @@ class Mappers:
 
         return Measurement(
             id=int(r["id"]) if r.get("id") is not None else None,
+            building_id=r.get("building_id"),
+            building_name=r.get("building_name"),
+            device_id=r.get("device_id"),
+            device_external_id=r.get("device_external_id"),
+            device_name=r.get("device_name"),
             ts=ts_val,
             metric=r["metric"],
             value=float(r["value"]),

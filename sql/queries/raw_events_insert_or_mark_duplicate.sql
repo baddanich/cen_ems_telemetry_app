@@ -1,21 +1,8 @@
--- Insert a new row every time; set is_duplicate=1 when this dedupe_key already exists
+-- Insert a raw ingest event payload (minimal raw_events table)
 INSERT INTO raw_events (
-    device_id,
-    source_ts,
-    metric,
-    value,
-    unit,
-    raw_payload,
-    dedupe_key,
-    is_duplicate
+    raw_payload
 )
-SELECT
-    :device_id,
-    :source_ts,
-    :metric,
-    :value,
-    :unit,
-    :raw_payload,
-    :dedupe_key,
-    CASE WHEN EXISTS (SELECT 1 FROM raw_events WHERE dedupe_key = :dedupe_key) THEN 1 ELSE 0 END
-RETURNING id, is_duplicate;
+VALUES (
+    :raw_payload
+)
+RETURNING id;

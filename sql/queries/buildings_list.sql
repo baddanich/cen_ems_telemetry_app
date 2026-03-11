@@ -1,7 +1,9 @@
 SELECT 
-    id, 
-    name
+    building_id AS id,
+    building_name AS name
 FROM 
-    buildings
+    measurements
+GROUP BY
+    building_id, building_name
 ORDER BY 
     name ASC;

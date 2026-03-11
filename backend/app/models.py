@@ -18,6 +18,11 @@ class Device(BaseModel):
 
 class Measurement(BaseModel):
     id: Optional[int] = None
+    building_id: Optional[str] = None
+    building_name: Optional[str] = None
+    device_id: Optional[str] = None
+    device_external_id: Optional[str] = None
+    device_name: Optional[str] = None
     ts: datetime
     metric: str
     value: float

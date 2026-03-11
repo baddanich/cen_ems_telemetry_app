@@ -12,6 +12,7 @@ The base requirements were delivered, with handling of bad records, late events,
 - Insufficient test coverage
 - UI endpoints need better organization
 - Out-of-index logic is naive, though it covers the specific use case
+- ~~Normalized schema~~
 
 
 ### Architecture
@@ -27,12 +28,13 @@ Each requirement is listed with a short justification for why it exists.
 
 | # | Requirement | Justification |
 |---|-------------|---------------|
-| R1 | **Ingestion & raw events** — `POST /ingest` stores every reading in `raw_events` and writes normalized rows to `measurements`. | Preserves audit trail; supports replay and debugging without losing original payloads. |
-| R2 | **Deduplication** — Deterministic `dedupe_key`; on conflict we still return the keep the row (`raw_events` table) and set `is_duplicate=1` for `measurement` table. | Keeps the history and non-silent logic; idempotent and avoids double-counting in deltas/totals. |
+| R1 | **Ingestion & raw events** — `POST /ingest` stores every reading in `raw_events` and writes denormalized rows to `measurements`. | Preserves audit trail; supports replay and debugging without losing original payloads. |
+| R2 | **Deduplication** — Deterministic `dedupe_key`; on conflict API still keeps the record and set `is_duplicate=1` for `measurement` table. | Keeps the history and non-silent logic; idempotent and avoids double-counting in deltas/totals. |
 | R3 | **Canonical metric & unit** — Energy is normalized to `energy_kwh_total`; Wh is converted to kWh; unknown units (e.g. kals) set `is_bad=1` but are still stored. | One consistent series for queries and UI; bad data is visible or hideable instead of dropped. |
 | R4 | **Quality flags** — Each measurement has `is_normal`, `is_reset`, `is_duplicate`, `is_late`, `is_bad`. | Enables filtering and highlighting of suspect data; totals and charts can exclude bad data by default. |
 | R5 | **Out of order handling** — late events handling The delta is computed using the simple relationship `delta = value[i] - value[i-1]`. | The chosen strategy is to recalculate only `value[i+1]` when late updates occur, as this is the sole value affected by the delta dependency. |
 | R6 | **Health check** — `GET /health` returns 200 when DB is reachable, 503 otherwise. | Enables load balancers and orchestration to probe readiness. |
+
 ### UI 
 
 | # | Requirement | Justification |

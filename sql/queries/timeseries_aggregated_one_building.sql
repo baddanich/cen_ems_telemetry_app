@@ -5,8 +5,7 @@ WITH bucketed AS (
         m.delta,
         datetime((strftime('%s', m.ts) / :bucket_seconds) * :bucket_seconds, 'unixepoch') AS partition_ts
     FROM measurements m
-    JOIN devices d ON d.id = m.device_id
-    WHERE d.building_id = :building_id {filter_clause}
+    WHERE m.building_id = :building_id {filter_clause}
 )
 SELECT
     partition_ts AS ts,

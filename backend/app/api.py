@@ -20,12 +20,12 @@ from .models import (
 )
 from .sql_loader import load_sql
 from .utils import (
-    DbResolver,
     FilterBuilder,
     IngestUtils,
     Mappers,
     MetricNorm,
     Parsing,
+    StableIds,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,17 +86,12 @@ async def ingest(
 
     logger.info('POST: Obtaining basic information')
 
-    building_id = await DbResolver.get_or_create_building(
-        session,
-        payload.building.name
-    )
+    building_name = payload.building.name
+    device_external_id = payload.device.external_id
+    device_name = payload.device.name
 
-    device_id = await DbResolver.get_or_create_device(
-        session,
-        building_id=building_id,
-        external_id=payload.device.external_id,
-        name=payload.device.name,
-    )
+    building_id = StableIds.building_id(building_name)
+    device_id = StableIds.device_id(device_external_id)
 
     for reading in payload.readings:
 
@@ -136,18 +131,7 @@ async def ingest(
 
         raw_timestamp_str = reading.timestamp.isoformat()
 
-        """ 2. Deduplication """
-
-        logger.info('POST: Deduplication')
-
-        dedupe_key = IngestUtils.compute_dedupe_key(
-            payload.device.external_id,
-            reading.metric,
-            reading.timestamp,
-            reading.value,
-            reading.dedupe_key,
-        )
-        """ 3. Saving raw data """
+        """ 2. Saving raw data """
 
         logger.info('POST: Saving raw data')
 
@@ -160,18 +144,18 @@ async def ingest(
             await session.execute(
                 text(load_sql("raw_events_insert_or_mark_duplicate.sql")),
                 {
-                    "device_id": device_id,
-                    "source_ts": raw_timestamp_str,
-                    "metric": reading.metric,
-                    "value": reading.value,
-                    "unit": reading.unit,
                     "raw_payload": raw_payload_str,
-                    "dedupe_key": dedupe_key,
                 },
             )
         ).mappings().first()
 
-        is_duplicate = 1 if inserted_raw.get("is_duplicate") else 0
+        already_exists = (
+            await session.execute(
+                text(load_sql("measurements_exists.sql")),
+                {"device_id": device_id, "metric": canonical_metric, "ts": raw_timestamp_str},
+            )
+        ).mappings().first()
+        is_duplicate = 1 if already_exists else 0
 
         """ 3. Saving processed data """
 
@@ -180,7 +164,11 @@ async def ingest(
         await session.execute(
             text(load_sql("measurements_upsert_from_ingest.sql")),
             {
+                "building_id": building_id,
+                "building_name": building_name,
                 "device_id": device_id,
+                "device_external_id": device_external_id,
+                "device_name": device_name,
                 "ts": raw_timestamp_str,
                 "metric": canonical_metric,
                 "value": canonical_value,
@@ -191,7 +179,8 @@ async def ingest(
                 "is_late": is_late,
                 "is_bad": is_bad,
                 "is_reset": is_reset,
-                "delta": delta
+                # For duplicates, do not contribute to aggregated deltas
+                "delta": None if is_duplicate else delta
             },
         )
 
@@ -384,6 +373,8 @@ async def timeseries(
         params["end"] = end.isoformat()
     if exclude_bad_bool:
         conditions.append("is_bad = 0")
+    # Do not plot duplicate measurements on the chart
+    conditions.append("is_duplicate = 0")
 
     where_clause = " AND ".join(conditions)
 
@@ -420,7 +411,7 @@ async def timeseries_by_building(
     metric_cond = (metric_cond.replace("metric =", "m.metric =")
                    .replace("is_bad =", "m.is_bad ="))
 
-    conditions = ["d.building_id = :building_id", metric_cond]
+    conditions = ["m.building_id = :building_id", metric_cond]
     params: dict = {"building_id": building_id, "metric": metric}
 
     if start is not None:
@@ -431,6 +422,8 @@ async def timeseries_by_building(
         params["end"] = end.isoformat()
     if exclude_bad_bool:
         conditions.append("m.is_bad = 0")
+    # Do not plot duplicate measurements on the chart
+    conditions.append("m.is_duplicate = 0")
 
     where_clause = " AND ".join(conditions)
     sql = load_sql("measurements_timeseries_by_building.sql").format(where_clause=where_clause)

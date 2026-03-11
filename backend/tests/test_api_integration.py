@@ -229,7 +229,7 @@ async def test_recent_exclude_bad(db_pool: AsyncSession, ensure_db_connected) ->
 
 @pytest.mark.asyncio
 async def test_duplicate_dedupe_key_sets_is_duplicate(db_pool: AsyncSession, ensure_db_connected) -> None:
-    """When the same reading (same dedupe_key) is ingested twice, raw_events marks duplicate and measurement gets is_duplicate=1."""
+    """When the same reading is ingested twice, original stays intact and duplicate row has is_duplicate=1."""
     app = create_app()
     transport = ASGITransport(app=app)
     base_ts = datetime(2024, 6, 10, 14, 0, 0, tzinfo=timezone.utc)
@@ -256,13 +256,11 @@ async def test_duplicate_dedupe_key_sets_is_duplicate(db_pool: AsyncSession, ens
                 params={"metric": "energy_kwh_total", "limit": 10, "exclude_bad": "false"},
             )
         ).json()
-        # Expanded: one row per ingest (original + duplicate)
+        # Two measurement rows: original (is_duplicate=False) and duplicate (is_duplicate=True)
         assert len(recent) == 2
-        by_dup = {bool(r["is_duplicate"]): r for r in recent}
-        assert by_dup[False]["value"] == pytest.approx(7.0)
-        assert by_dup[True]["value"] == pytest.approx(7.0)
-        assert by_dup[True]["is_duplicate"] is True
-        assert by_dup[False]["is_duplicate"] is False
+        flags = sorted((r["is_duplicate"], r["value"]) for r in recent)
+        assert flags[0] == (False, pytest.approx(7.0))
+        assert flags[1][0] is True
 
 
 @pytest.mark.asyncio

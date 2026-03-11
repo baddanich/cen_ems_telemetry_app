@@ -1,5 +1,5 @@
 """
-Unit tests for backend.app.utils (Parsing, MetricNorm, IngestUtils, FilterBuilder, Mappers, DbResolver).
+Unit tests for backend.app.utils (Parsing, MetricNorm, IngestUtils, FilterBuilder, Mappers, StableIds).
 """
 from datetime import datetime, timezone
 
@@ -10,12 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.utils import (
     ENERGY_UNITS_KWH,
     ENERGY_UNITS_WH,
-    DbResolver,
     FilterBuilder,
     IngestUtils,
     Mappers,
     MetricNorm,
     Parsing,
+    StableIds,
 )
 
 
@@ -229,35 +229,38 @@ class TestMappers:
         assert m.delta is None
         assert m.is_normal is False
 
+    def test_row_to_measurement_with_identity_fields(self):
+        row = {
+            "id": 5,
+            "building_id": "b1",
+            "building_name": "Building 1",
+            "device_id": "d1",
+            "device_external_id": "dev-1",
+            "device_name": "Device 1",
+            "ts": "2024-06-01T12:00:00Z",
+            "metric": "energy_kwh_total",
+            "value": 42.0,
+            "unit": "kWh",
+        }
+        m = Mappers.row_to_measurement(row)
+        assert m.id == 5
+        assert m.building_id == "b1"
+        assert m.building_name == "Building 1"
+        assert m.device_id == "d1"
+        assert m.device_external_id == "dev-1"
+        assert m.device_name == "Device 1"
+
 
 # ---------------------------------------------------------------------------
-# DbResolver (integration-style: needs DB and SQL files)
+# StableIds
 # ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-class TestDbResolver:
-    async def test_get_or_create_building_creates(self, db_pool: AsyncSession) -> None:
-        bid = await DbResolver.get_or_create_building(db_pool, "Test Building A")
-        assert bid is not None
-        row = (await db_pool.execute(text("SELECT id, name FROM buildings WHERE id = :id"), {"id": bid})).mappings().first()
-        assert row is not None
-        assert row["name"] == "Test Building A"
+class TestStableIds:
+    def test_building_id_is_deterministic(self):
+        a1 = StableIds.building_id("Building A")
+        a2 = StableIds.building_id("building a")
+        assert a1 == a2
 
-    async def test_get_or_create_building_returns_existing(self, db_pool: AsyncSession) -> None:
-        bid1 = await DbResolver.get_or_create_building(db_pool, "Same Name")
-        bid2 = await DbResolver.get_or_create_building(db_pool, "Same Name")
-        assert bid1 == bid2
-
-    async def test_get_or_create_device_creates(self, db_pool: AsyncSession) -> None:
-        bid = await DbResolver.get_or_create_building(db_pool, "For Device")
-        did = await DbResolver.get_or_create_device(db_pool, bid, "ext-1", "Device One")
-        assert did is not None
-        row = (await db_pool.execute(text("SELECT id, building_id, external_id FROM devices WHERE id = :id"), {"id": did})).mappings().first()
-        assert row is not None
-        assert row["building_id"] == bid
-        assert row["external_id"] == "ext-1"
-
-    async def test_get_or_create_device_returns_existing(self, db_pool: AsyncSession) -> None:
-        bid = await DbResolver.get_or_create_building(db_pool, "For Device Idempotent")
-        did1 = await DbResolver.get_or_create_device(db_pool, bid, "ext-same", None)
-        did2 = await DbResolver.get_or_create_device(db_pool, bid, "ext-same", "Other Name")
-        assert did1 == did2
+    def test_device_id_is_deterministic(self):
+        d1 = StableIds.device_id("dev-1")
+        d2 = StableIds.device_id("DEV-1")
+        assert d1 == d2
