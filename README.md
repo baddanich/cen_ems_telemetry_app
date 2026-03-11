@@ -13,6 +13,7 @@ The base requirements were delivered, with handling of bad records, late events,
 - UI endpoints need better organization
 - Out-of-index logic is naive, though it covers the specific use case
 - ~~Normalized schema~~
+- Lack of consistency: Ideally, all logic should be moved into SQL queries, minimizing the number of logical operations in Python.
 
 
 ### Architecture
